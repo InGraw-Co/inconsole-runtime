@@ -152,6 +152,8 @@ struct InputSnapshot {
 
     int axis_x;
     int axis_y;
+    int axis_x_render;
+    int axis_y_render;
     uint64_t edge_accept_ms;
     uint64_t edge_back_ms;
     uint64_t edge_menu_ms;
@@ -374,7 +376,7 @@ private:
     void handle_joy_axis(uint8_t axis, int value);
     void handle_joy_hat(uint8_t value);
     void open_sdl_inputs(Logger *logger);
-    void open_evdev_inputs(Logger *logger);
+    bool open_evdev_inputs(Logger *logger);
     void close_inputs();
     bool compute_repeat(int idx, bool held, uint64_t now_ms);
     void update_snapshot(uint64_t now_ms);

@@ -2363,6 +2363,8 @@ void DiagnosticsScene::render(Renderer *renderer, uint32_t now_ms, const UiRunti
     renderer->draw_text(tr(settings_, "Analog / Bateria", "Analog / Battery"), right.x + 8, right.y + 6, theme.text_primary, true);
     const int axis_x = std::max(-32768, std::min(32767, last_input_.axis_x));
     const int axis_y = std::max(-32768, std::min(32767, last_input_.axis_y));
+    const int axis_render_x = std::max(-32768, std::min(32767, last_input_.axis_x_render));
+    const int axis_render_y = std::max(-32768, std::min(32767, last_input_.axis_y_render));
     renderer->draw_text("X: " + std::to_string(axis_x), right.x + 8, right.y + 26, theme.text_muted);
     renderer->draw_text("Y: " + std::to_string(axis_y), right.x + 8, right.y + 40, theme.text_muted);
 
@@ -2380,8 +2382,8 @@ void DiagnosticsScene::render(Renderer *renderer, uint32_t now_ms, const UiRunti
     renderer->fill_rect(cx - 1, cy - r, 2, r * 2 + 1, mix_color(theme.panel_border, theme.text_muted, 0.4f));
     renderer->fill_rect(cx - r, cy - 1, r * 2 + 1, 2, mix_color(theme.panel_border, theme.text_muted, 0.4f));
     const int knob_r = 5;
-    const int kx = cx + (axis_x * (r - knob_r - 2)) / 32768;
-    const int ky = cy + (axis_y * (r - knob_r - 2)) / 32768;
+    const int kx = cx + (axis_render_x * (r - knob_r - 2)) / 32767;
+    const int ky = cy + (axis_render_y * (r - knob_r - 2)) / 32767;
     for (int yy = -knob_r; yy <= knob_r; ++yy) {
         for (int xx = -knob_r; xx <= knob_r; ++xx) {
             if (xx * xx + yy * yy <= knob_r * knob_r) renderer->fill_rect(kx + xx, ky + yy, 1, 1, theme.accent);

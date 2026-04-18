@@ -39,6 +39,7 @@ define INCONSOLE_RUNTIME_INSTALL_TARGET_CMDS
 	cp -a $(INCONSOLE_RUNTIME_PKGDIR)/assets/system-icons/. \
 		$(TARGET_DIR)/usr/share/inconsole/system-icons/
 	$(INSTALL) -d $(TARGET_DIR)/usr/share/inconsole/default-apps
+	rm -rf $(TARGET_DIR)/usr/share/inconsole/default-apps/exit-to-terminal
 	cp -a $(INCONSOLE_RUNTIME_PKGDIR)/userdata/apps/. \
 		$(TARGET_DIR)/usr/share/inconsole/default-apps/
 	if [ -f $(TARGET_DIR)/usr/share/inconsole/default-apps/doom/launch.sh ]; then chmod +x $(TARGET_DIR)/usr/share/inconsole/default-apps/doom/launch.sh; fi
