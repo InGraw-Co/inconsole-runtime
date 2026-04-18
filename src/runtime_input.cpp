@@ -151,11 +151,15 @@ void Input::init(Logger *logger) {
     last_edge_l_ms_ = 0;
     last_edge_r_ms_ = 0;
 
-    open_sdl_inputs(logger);
-    open_evdev_inputs(logger);
+    const bool have_evdev = open_evdev_inputs(logger);
+    if (!have_evdev) {
+        open_sdl_inputs(logger);
+    } else if (logger) {
+        logger->info("Input: evdev primary, SDL joystick fallback disabled");
+    }
 
     if (logger) {
-        logger->info("Input mapping: DTS-style buttons + joystick + keyboard fallback");
+        logger->info("Input mapping: evdev primary + keyboard fallback");
         logger->info("Input fallback keyboard: arrows/WASD, Enter=Accept, Esc=Back, Tab=Menu");
         logger->info("Input fallback shoulder/select: Q/E and RightShift");
     }
@@ -190,11 +194,12 @@ void Input::open_sdl_inputs(Logger *logger) {
     }
 }
 
-void Input::open_evdev_inputs(Logger *logger) {
+bool Input::open_evdev_inputs(Logger *logger) {
+    bool found_useful = false;
     DIR *dir = opendir("/dev/input");
     if (!dir) {
         if (logger) logger->warn("Input: /dev/input not available");
-        return;
+        return false;
     }
 
     std::vector<std::string> paths;
@@ -253,8 +258,11 @@ void Input::open_evdev_inputs(Logger *logger) {
         }
 
         evdev_fds_.push_back(fd);
+        found_useful = true;
         if (logger) logger->info("Input: evdev open: " + path + " [" + evdev_name(fd) + "]");
     }
+
+    return found_useful;
 }
 
 void Input::close_inputs() {
@@ -301,9 +309,22 @@ void Input::configure_axis_calibration(int fd, int code, AxisCalibration *cal, c
 }
 
 void Input::prime_axis_center(AxisCalibration *cal, int value) {
-    if (!cal || cal->centered_from_event) return;
+    if (!cal || cal->has_absinfo || cal->centered_from_event) return;
+    if (std::abs(value) > 256) return;
     cal->center = value;
     cal->centered_from_event = true;
+}
+
+int scale_axis_for_render(int centered_value, bool has_absinfo, int min_value, int max_value, int center_value) {
+    if (!has_absinfo) {
+        return std::max(-32768, std::min(32767, centered_value));
+    }
+
+    const int span_neg = std::max(1, center_value - min_value);
+    const int span_pos = std::max(1, max_value - center_value);
+    const int span = std::max(span_neg, span_pos);
+    const int clamped = std::max(-span, std::min(span, centered_value));
+    return (clamped * 32767) / span;
 }
 
 void Input::set_button_state(bool &field, bool pressed, bool *queued_hold, bool *queued_nav, uint64_t *edge_ms) {
@@ -416,10 +437,6 @@ void Input::map_joy_button(uint8_t button, bool pressed) {
                 queued_menu_ = true;
                 queued_menu_ms_ = last_edge_start_ms_;
             }
-            break;
-        case 9:
-        case 10:
-            set_button_state(raw_.joy, pressed, nullptr, nullptr, nullptr);
             break;
         case 11: set_button_state(raw_.up, pressed, nullptr, &queued_nav_up_, nullptr); break;
         case 12: set_button_state(raw_.down, pressed, nullptr, &queued_nav_down_, nullptr); break;
@@ -595,6 +612,10 @@ void Input::update_snapshot(uint64_t now_ms) {
     snapshot_.hold_joy = raw_.joy;
     snapshot_.axis_x = centered_x;
     snapshot_.axis_y = centered_y;
+    snapshot_.axis_x_render =
+        scale_axis_for_render(centered_x, axis_x_cal_.has_absinfo, axis_x_cal_.min, axis_x_cal_.max, axis_x_cal_.center);
+    snapshot_.axis_y_render =
+        scale_axis_for_render(centered_y, axis_y_cal_.has_absinfo, axis_y_cal_.min, axis_y_cal_.max, axis_y_cal_.center);
     const bool select_edge = (raw_.select && !prev_raw_.select) || queued_hold_select_;
     const bool l_edge = (raw_.l && !prev_raw_.l) || queued_hold_l_;
     const bool r_edge = (raw_.r && !prev_raw_.r) || queued_hold_r_;

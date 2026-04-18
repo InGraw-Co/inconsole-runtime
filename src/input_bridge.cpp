@@ -131,31 +131,48 @@ struct AxisState {
     bool down;
     int center_x;
     int center_y;
-    bool center_x_set;
-    bool center_y_set;
+    int min_x;
+    int max_x;
+    int min_y;
+    int max_y;
     int deadzone;
 };
+
+void configure_axis_state(int fd, AxisState *a) {
+    if (!a) return;
+
+    struct input_absinfo absinfo;
+    memset(&absinfo, 0, sizeof(absinfo));
+    if (ioctl(fd, EVIOCGABS(ABS_X), &absinfo) == 0) {
+        a->min_x = absinfo.minimum;
+        a->max_x = absinfo.maximum;
+        a->center_x = (absinfo.minimum + absinfo.maximum) / 2;
+        const int span = std::max(1, absinfo.maximum - absinfo.minimum);
+        a->deadzone = std::max(a->deadzone, std::max(2000, span / 9));
+    }
+    if (ioctl(fd, EVIOCGABS(ABS_Y), &absinfo) == 0) {
+        a->min_y = absinfo.minimum;
+        a->max_y = absinfo.maximum;
+        a->center_y = (absinfo.minimum + absinfo.maximum) / 2;
+        const int span = std::max(1, absinfo.maximum - absinfo.minimum);
+        a->deadzone = std::max(a->deadzone, std::max(2000, span / 9));
+    }
+}
 
 void map_abs_event(int ufd, int code, int value, AxisState *a, ButtonState *st) {
     if (!a || !st) return;
     if (code == ABS_X) {
-        if (!a->center_x_set) {
-            a->center_x = value;
-            a->center_x_set = true;
-        }
         const int dv = value - a->center_x;
-        const bool left = dv < -a->deadzone;
-        const bool right = dv > a->deadzone;
+        const int dz = std::max(2000, a->deadzone);
+        const bool left = dv < -dz;
+        const bool right = dv > dz;
         set_virtual_key(ufd, &st->left, left, KEY_LEFT);
         set_virtual_key(ufd, &st->right, right, KEY_RIGHT);
     } else if (code == ABS_Y) {
-        if (!a->center_y_set) {
-            a->center_y = value;
-            a->center_y_set = true;
-        }
         const int dv = value - a->center_y;
-        const bool up = dv < -a->deadzone;
-        const bool down = dv > a->deadzone;
+        const int dz = std::max(2000, a->deadzone);
+        const bool up = dv < -dz;
+        const bool down = dv > dz;
         set_virtual_key(ufd, &st->up, up, KEY_UP);
         set_virtual_key(ufd, &st->down, down, KEY_DOWN);
     } else if (code == ABS_HAT0X) {
@@ -231,8 +248,18 @@ int main() {
     AxisState axis;
     memset(&axis, 0, sizeof(axis));
     axis.deadzone = 2500;
+    axis.center_x = 0;
+    axis.center_y = 0;
+    axis.min_x = -32768;
+    axis.max_x = 32767;
+    axis.min_y = -32768;
+    axis.max_y = 32767;
     ButtonState buttons;
     memset(&buttons, 0, sizeof(buttons));
+
+    for (size_t i = 0; i < fds.size(); ++i) {
+        configure_axis_state(fds[i], &axis);
+    }
 
     std::vector<struct pollfd> polls;
     polls.reserve(fds.size());

@@ -310,8 +310,8 @@ InputSnapshot::InputSnapshot()
     : hold_up(false), hold_down(false), hold_left(false), hold_right(false), hold_a(false), hold_b(false), hold_start(false),
       hold_select(false), hold_l(false), hold_r(false), hold_joy(false), nav_up(false), nav_down(false), nav_left(false),
       nav_right(false),
-      accept(false), back(false), menu(false), axis_x(0), axis_y(0), edge_accept_ms(0), edge_back_ms(0), edge_menu_ms(0),
-      edge_select_ms(0), edge_l_ms(0), edge_r_ms(0) {}
+      accept(false), back(false), menu(false), axis_x(0), axis_y(0), axis_x_render(0), axis_y_render(0), edge_accept_ms(0),
+      edge_back_ms(0), edge_menu_ms(0), edge_select_ms(0), edge_l_ms(0), edge_r_ms(0) {}
 
 RuntimePerfStats::RuntimePerfStats()
     : frame_ms(0),
