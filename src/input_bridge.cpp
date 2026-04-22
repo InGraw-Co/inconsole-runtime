@@ -5,9 +5,11 @@
 #include <linux/uinput.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -85,6 +87,9 @@ struct ButtonState {
     bool down;
     bool left;
     bool right;
+    bool start;
+    bool select;
+    bool exit_triggered;
 };
 
 void set_virtual_key(int ufd, bool *state, bool next, unsigned short keycode) {
@@ -93,7 +98,33 @@ void set_virtual_key(int ufd, bool *state, bool next, unsigned short keycode) {
     if (emit_key(ufd, keycode, next) == 0) *state = next;
 }
 
-void map_button_event(int ufd, int code, bool pressed, ButtonState *st) {
+void release_all_keys(int ufd, ButtonState *st) {
+    if (!st) return;
+    set_virtual_key(ufd, &st->up, false, KEY_UP);
+    set_virtual_key(ufd, &st->down, false, KEY_DOWN);
+    set_virtual_key(ufd, &st->left, false, KEY_LEFT);
+    set_virtual_key(ufd, &st->right, false, KEY_RIGHT);
+    emit_key(ufd, KEY_LEFTCTRL, false);
+    emit_key(ufd, KEY_SPACE, false);
+    emit_key(ufd, KEY_LEFTSHIFT, false);
+    emit_key(ufd, KEY_LEFTALT, false);
+    emit_key(ufd, KEY_TAB, false);
+    emit_key(ufd, KEY_ESC, false);
+    emit_key(ufd, KEY_Q, false);
+    emit_key(ufd, KEY_E, false);
+    emit_key(ufd, KEY_ENTER, false);
+}
+
+void maybe_trigger_exit(int ufd, ButtonState *st, pid_t exit_pid) {
+    if (!st || st->exit_triggered || exit_pid <= 0) return;
+    if (!st->start || !st->select) return;
+    st->exit_triggered = true;
+    kill(exit_pid, SIGTERM);
+    release_all_keys(ufd, st);
+    g_stop = 1;
+}
+
+void map_button_event(int ufd, int code, bool pressed, pid_t exit_pid, ButtonState *st) {
     switch (code) {
         case BTN_DPAD_UP:
         case KEY_UP:
@@ -115,8 +146,16 @@ void map_button_event(int ufd, int code, bool pressed, ButtonState *st) {
         case BTN_EAST: emit_key(ufd, KEY_SPACE, pressed); break;
         case BTN_NORTH: emit_key(ufd, KEY_LEFTSHIFT, pressed); break;
         case BTN_WEST: emit_key(ufd, KEY_LEFTALT, pressed); break;
-        case BTN_START: emit_key(ufd, KEY_ESC, pressed); break;
-        case BTN_SELECT: emit_key(ufd, KEY_TAB, pressed); break;
+        case BTN_START:
+            st->start = pressed;
+            emit_key(ufd, KEY_ESC, pressed);
+            if (pressed) maybe_trigger_exit(ufd, st, exit_pid);
+            break;
+        case BTN_SELECT:
+            st->select = pressed;
+            emit_key(ufd, KEY_TAB, pressed);
+            if (pressed) maybe_trigger_exit(ufd, st, exit_pid);
+            break;
         case BTN_TL: emit_key(ufd, KEY_Q, pressed); break;
         case BTN_TR: emit_key(ufd, KEY_E, pressed); break;
         case BTN_THUMBL: emit_key(ufd, KEY_ENTER, pressed); break;
@@ -184,29 +223,20 @@ void map_abs_event(int ufd, int code, int value, AxisState *a, ButtonState *st) 
     }
 }
 
-void release_all_keys(int ufd, ButtonState *st) {
-    if (!st) return;
-    set_virtual_key(ufd, &st->up, false, KEY_UP);
-    set_virtual_key(ufd, &st->down, false, KEY_DOWN);
-    set_virtual_key(ufd, &st->left, false, KEY_LEFT);
-    set_virtual_key(ufd, &st->right, false, KEY_RIGHT);
-    emit_key(ufd, KEY_LEFTCTRL, false);
-    emit_key(ufd, KEY_SPACE, false);
-    emit_key(ufd, KEY_LEFTSHIFT, false);
-    emit_key(ufd, KEY_LEFTALT, false);
-    emit_key(ufd, KEY_TAB, false);
-    emit_key(ufd, KEY_ESC, false);
-    emit_key(ufd, KEY_Q, false);
-    emit_key(ufd, KEY_E, false);
-    emit_key(ufd, KEY_ENTER, false);
-}
-
 }  // namespace
 
 int main() {
     signal(SIGTERM, on_signal);
     signal(SIGINT, on_signal);
     signal(SIGHUP, on_signal);
+
+    pid_t exit_pid = -1;
+    const char *exit_pid_env = getenv("INCONSOLE_EXIT_PID");
+    if (exit_pid_env && exit_pid_env[0] != '\0') {
+        char *end = nullptr;
+        long value = strtol(exit_pid_env, &end, 10);
+        if (end && *end == '\0' && value > 1 && value <= 2147483647L) exit_pid = static_cast<pid_t>(value);
+    }
 
     std::vector<std::string> paths;
     DIR *dir = opendir("/dev/input");
@@ -287,7 +317,7 @@ int main() {
                 if (rd == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
                 if (rd != static_cast<ssize_t>(sizeof(ev))) break;
 
-                if (ev.type == EV_KEY) map_button_event(ufd, ev.code, ev.value != 0, &buttons);
+                if (ev.type == EV_KEY) map_button_event(ufd, ev.code, ev.value != 0, exit_pid, &buttons);
                 if (ev.type == EV_ABS) map_abs_event(ufd, ev.code, ev.value, &axis, &buttons);
             }
         }
