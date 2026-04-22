@@ -1,0 +1,11 @@
+{
+  "id": "system.sound_test",
+  "type": "tool|narzędzie",
+  "name": "Test dźwięku|Sound Test",
+  "description": "Odtwarza krótki test ALSA przez głośnik lub słuchawki.|Plays a short ALSA test through the speaker or headphones.",
+  "icon": "/usr/share/inconsole/system-icons/diagnostics.png",
+  "exec": "launch.sh",
+  "category": "System|System",
+  "order": 20,
+  "exclusive_runtime": false
+}

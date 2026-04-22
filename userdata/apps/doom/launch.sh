@@ -13,6 +13,7 @@ VIDEO_W="${INCONSOLE_DOOM_WIDTH:-480}"
 VIDEO_H="${INCONSOLE_DOOM_HEIGHT:-272}"
 STARTUP_TIMEOUT="${INCONSOLE_DOOM_STARTUP_TIMEOUT:-8}"
 PRBOOM_EXTRA_ARGS="${INCONSOLE_DOOM_EXTRA_ARGS:-}"
+EXIT_PID=""
 BRIDGE_PID=""
 
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-fbcon}"
@@ -57,9 +58,14 @@ stop_bridge() {
 		sleep 1
 		kill -9 "${BRIDGE_PID}" 2>/dev/null || true
 	fi
+	BRIDGE_PID=""
 }
 
 start_bridge() {
+	if [ -z "${EXIT_PID}" ]; then
+		log_line "input bridge skipped: missing exit pid"
+		return
+	fi
 	if [ ! -e /dev/uinput ] && command -v modprobe >/dev/null 2>&1; then
 		modprobe uinput >/dev/null 2>&1 || true
 	fi
@@ -71,7 +77,7 @@ start_bridge() {
 		log_line "input bridge missing: ${BRIDGE_BIN}"
 		return
 	fi
-	"${BRIDGE_BIN}" >> "${DOOM_LOG}" 2>&1 &
+	INCONSOLE_EXIT_PID="${EXIT_PID}" "${BRIDGE_BIN}" >> "${DOOM_LOG}" 2>&1 &
 	BRIDGE_PID=$!
 	log_line "input bridge started pid=${BRIDGE_PID}"
 }
@@ -87,7 +93,6 @@ fi
 
 rm -f "${DOOM_LOG}"
 printf '%s\n' "---- doom run ---- $(ts)" >> "${DOOM_LOG}"
-start_bridge
 trap 'stop_bridge' EXIT INT TERM
 
 start_prboom_try() {
@@ -95,6 +100,7 @@ start_prboom_try() {
 	h="$2"
 	log_line "try start prboom bin=${PRBOOM_BIN} iwad=${IWAD} geom=${w}x${h}"
 
+	stop_bridge
 	"${PRBOOM_BIN}" \
 		-iwad "${IWAD}" \
 		-config "${CFG_FILE}" \
@@ -107,6 +113,8 @@ start_prboom_try() {
 		-nomusic \
 		${PRBOOM_EXTRA_ARGS} >> "${DOOM_LOG}" 2>&1 &
 	DOOM_PID=$!
+	EXIT_PID="${DOOM_PID}"
+	start_bridge
 
 	started=0
 	t=0
@@ -134,6 +142,7 @@ start_prboom_try() {
 	rc=$?
 	set -e
 	log_line "prboom finished rc=${rc} started=${started} geom=${w}x${h}"
+	stop_bridge
 
 	if [ "$started" -eq 1 ]; then
 		return 0
