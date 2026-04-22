@@ -79,3 +79,5 @@ and switches to recovery mode with a message on `tty0`.
 
 ## inconsole-input-bridge
 Creates a virtual keyboard via `uinput` and maps `evdev` controller input (D-Pad/axes/buttons) to keyboard keys. Useful for applications that require keyboard input.
+
+If the bridge is launched with `INCONSOLE_EXIT_PID`, holding `START + SELECT` sends `SIGTERM` to that process so games and emulators can return to the launcher without relying on in-game menus.
