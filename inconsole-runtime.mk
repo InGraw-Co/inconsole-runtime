@@ -43,6 +43,7 @@ define INCONSOLE_RUNTIME_INSTALL_TARGET_CMDS
 	cp -a $(INCONSOLE_RUNTIME_PKGDIR)/userdata/apps/. \
 		$(TARGET_DIR)/usr/share/inconsole/default-apps/
 	if [ -f $(TARGET_DIR)/usr/share/inconsole/default-apps/doom/launch.sh ]; then chmod +x $(TARGET_DIR)/usr/share/inconsole/default-apps/doom/launch.sh; fi
+	if [ -f $(TARGET_DIR)/usr/share/inconsole/default-apps/sound-test/launch.sh ]; then chmod +x $(TARGET_DIR)/usr/share/inconsole/default-apps/sound-test/launch.sh; fi
 
 	rm -rf $(TARGET_DIR)/userdata
 	$(INSTALL) -d $(TARGET_DIR)/userdata
@@ -51,7 +52,9 @@ define INCONSOLE_RUNTIME_INSTALL_TARGET_CMDS
 	rm -f $(TARGET_DIR)/userdata/system/profile.json
 	chmod +x $(TARGET_DIR)/userdata/system/postscript.sh
 	chmod +x $(TARGET_DIR)/userdata/system/undo_postscript.sh
+	chmod +x $(TARGET_DIR)/userdata/system/launch-with-exit.sh
 	if [ -f $(TARGET_DIR)/userdata/apps/doom/launch.sh ]; then chmod +x $(TARGET_DIR)/userdata/apps/doom/launch.sh; fi
+	if [ -f $(TARGET_DIR)/userdata/apps/sound-test/launch.sh ]; then chmod +x $(TARGET_DIR)/userdata/apps/sound-test/launch.sh; fi
 endef
 
 $(eval $(generic-package))
