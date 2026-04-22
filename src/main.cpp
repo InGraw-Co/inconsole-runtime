@@ -35,6 +35,7 @@ std::string data_root() {
 
 std::string app_dir() { return data_root() + "/apps"; }
 std::string system_dir() { return data_root() + "/system"; }
+std::string themes_dir() { return data_root() + "/themes"; }
 std::string logs_dir() { return system_dir() + "/logs"; }
 std::string core_log_path() { return logs_dir() + "/runtime-core.log"; }
 
@@ -243,6 +244,7 @@ App::App()
       system_info_scene_(&registry_, &settings_, &logger_),
       file_manager_scene_(&settings_, &logger_),
       power_off_scene_(&settings_),
+      charging_scene_(&settings_, &settings_store_, &battery_, &logger_),
       scene_manager_(),
       overlay_message_(),
       overlay_until_ms_(0),
@@ -263,13 +265,23 @@ void App::show_message(const std::string &msg, uint32_t duration_ms) {
 }
 
 void App::render_overlay(uint32_t now_ms) {
+    const Theme &theme = theme_by_id(settings_.theme_id);
     if (!overlay_message_.empty()) {
         if (now_ms > overlay_until_ms_) {
             overlay_message_.clear();
         } else {
-            renderer_.fill_rect(30, 210, renderer_.width() - 60, 36, Color{25, 30, 38});
-            renderer_.draw_rect_outline(30, 210, renderer_.width() - 60, 36, Color{190, 110, 80});
-            renderer_.draw_text_centered(overlay_message_, renderer_.width() / 2, 220, Color{240, 220, 210});
+            renderer_.draw_panel_cached("overlay-message",
+                                        30,
+                                        210,
+                                        renderer_.width() - 60,
+                                        36,
+                                        theme.panel_focus_top,
+                                        theme.panel_focus_bottom,
+                                        theme.warn,
+                                        theme.corner_radius,
+                                        static_cast<uint8_t>(theme.panel_alpha),
+                                        true);
+            renderer_.draw_text_centered(overlay_message_, renderer_.width() / 2, 220, theme.text_primary);
         }
     }
 
@@ -278,17 +290,35 @@ void App::render_overlay(uint32_t now_ms) {
         const int h = 26;
         const int x = (renderer_.width() - w) / 2;
         const int y = 10;
-        renderer_.fill_rect(x, y, w, h, Color{18, 24, 34});
-        renderer_.draw_rect_outline(x, y, w, h, Color{88, 120, 168});
+        renderer_.draw_panel_cached("overlay-volume",
+                                    x,
+                                    y,
+                                    w,
+                                    h,
+                                    theme.panel_top,
+                                    theme.panel_bottom,
+                                    theme.panel_border,
+                                    std::max(8, theme.corner_radius - 1),
+                                    static_cast<uint8_t>(theme.panel_alpha),
+                                    false);
         const std::string label = translate_ui_text(normalize_language(settings_.language), "Volume", "Volume");
-        renderer_.draw_text(label, x + 8, y + 5, Color{210, 220, 236});
+        renderer_.draw_text(label, x + 8, y + 5, theme.text_primary);
         const int bw = 90;
         const int bx = x + w - bw - 10;
         const int by = y + 9;
-        renderer_.fill_rect(bx, by, bw, 8, Color{30, 38, 52});
-        renderer_.draw_rect_outline(bx, by, bw, 8, Color{110, 138, 178});
+        renderer_.draw_panel_cached("overlay-volume-meter",
+                                    bx,
+                                    by,
+                                    bw,
+                                    8,
+                                    theme.panel_bottom,
+                                    theme.panel_bottom,
+                                    theme.panel_border,
+                                    4,
+                                    255,
+                                    false);
         const int fill = ((bw - 2) * std::max(0, std::min(100, volume_overlay_value_))) / 100;
-        if (fill > 0) renderer_.fill_rect(bx + 1, by + 1, fill, 6, Color{92, 194, 255});
+        if (fill > 0) renderer_.fill_rect(bx + 1, by + 1, fill, 6, theme.accent);
     }
 }
 
@@ -303,6 +333,7 @@ int App::run() {
 
     ensure_directory(data_root());
     ensure_directory(app_dir());
+    ensure_directory(themes_dir());
     ensure_directory(system_dir());
     ensure_directory(logs_dir());
 
@@ -362,6 +393,7 @@ int App::run() {
     scene_manager_.register_scene(SCENE_SYSTEM_INFO, &system_info_scene_);
     scene_manager_.register_scene(SCENE_FILE_MANAGER, &file_manager_scene_);
     scene_manager_.register_scene(SCENE_POWER_OFF, &power_off_scene_);
+    scene_manager_.register_scene(SCENE_CHARGER, &charging_scene_);
 
     SceneId initial_scene = SCENE_WIZARD;
     if (has_profile) {
@@ -534,7 +566,9 @@ int App::run() {
         perf_stats_.present_ms = present_end_ms - present_start_ms;
 
         uint32_t frame_time = SDL_GetTicks() - frame_start;
-        if (target_frame_ms > 0 && frame_time < target_frame_ms) SDL_Delay(target_frame_ms - frame_time);
+        uint32_t delay_target_ms = target_frame_ms;
+        if (out.post_frame_delay_ms > delay_target_ms) delay_target_ms = out.post_frame_delay_ms;
+        if (delay_target_ms > 0 && frame_time < delay_target_ms) SDL_Delay(delay_target_ms - frame_time);
 
         const uint32_t frame_end_ms = SDL_GetTicks();
         perf_stats_.frame_ms = frame_end_ms - frame_start;
