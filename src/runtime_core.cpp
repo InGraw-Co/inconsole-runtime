@@ -36,6 +36,121 @@ std::string now_timestamp() {
 }
 
 bool extract_string(const std::string &json, const std::string &key, std::string *out);
+bool read_file_int(const std::string &path, int *out);
+
+std::string shell_single_quote(const std::string &value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    out.push_back('\'');
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '\'')
+            out += "'\\''";
+        else
+            out.push_back(value[i]);
+    }
+    out.push_back('\'');
+    return out;
+}
+
+std::string collapse_ws(const std::string &value) {
+    std::string out;
+    out.reserve(value.size());
+    bool last_space = false;
+    for (size_t i = 0; i < value.size(); ++i) {
+        unsigned char ch = static_cast<unsigned char>(value[i]);
+        if (std::isspace(ch)) {
+            if (!out.empty() && !last_space) out.push_back(' ');
+            last_space = true;
+        } else {
+            out.push_back(static_cast<char>(ch));
+            last_space = false;
+        }
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+std::string run_command_capture(const std::string &cmd, int *status) {
+    FILE *pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        if (status) *status = -1;
+        return std::string();
+    }
+
+    std::string output;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), pipe)) output += buf;
+
+    int rc = pclose(pipe);
+    if (status) *status = rc;
+    return output;
+}
+
+bool ensure_pwm_channel_exported(const std::string &base, int channel, Logger *logger) {
+    const std::string pwm_dir = base + "/pwm" + std::to_string(channel);
+    struct stat st;
+    if (stat(pwm_dir.c_str(), &st) == 0) return true;
+
+    const std::string export_path = base + "/export";
+    std::ostringstream ss;
+    ss << channel << "\n";
+    if (!write_text_file(export_path, ss.str())) {
+        if (logger) logger->warn("Unable to export PWM channel " + std::to_string(channel) + " at " + base);
+        return false;
+    }
+
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (stat(pwm_dir.c_str(), &st) == 0) return true;
+        usleep(10000);
+    }
+    if (logger) logger->warn("PWM channel export timed out for " + pwm_dir);
+    return false;
+}
+
+bool write_pwm_backlight_percent(int percent, Logger *logger) {
+    DIR *dir = opendir("/sys/class/pwm");
+    if (!dir) return false;
+
+    bool applied = false;
+    struct dirent *ent = nullptr;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (strncmp(ent->d_name, "pwmchip", 7) != 0) continue;
+        const std::string base = std::string("/sys/class/pwm/") + ent->d_name;
+        int npwm = 0;
+        if (!read_file_int(base + "/npwm", &npwm) || npwm <= 7) continue;
+        if (!ensure_pwm_channel_exported(base, 7, logger)) continue;
+
+        const std::string pwm_dir = base + "/pwm7";
+        const std::string enable_path = pwm_dir + "/enable";
+        const std::string period_path = pwm_dir + "/period";
+        const std::string duty_path = pwm_dir + "/duty_cycle";
+        const std::string polarity_path = pwm_dir + "/polarity";
+        const int clamped = std::max(0, std::min(100, percent));
+        int period_ns = 1000000;
+        if (!read_file_int(period_path, &period_ns) || period_ns <= 0) period_ns = 1000000;
+        const int duty_ns = (period_ns * clamped) / 100;
+
+        write_text_file(enable_path, "0\n");
+        if (access(polarity_path.c_str(), F_OK) == 0) write_text_file(polarity_path, "normal\n");
+
+        std::ostringstream period_ss;
+        period_ss << period_ns << "\n";
+        std::ostringstream duty_ss;
+        duty_ss << duty_ns << "\n";
+        if (!write_text_file(period_path, period_ss.str())) continue;
+        if (!write_text_file(duty_path, duty_ss.str())) continue;
+        if (!write_text_file(enable_path, "1\n")) continue;
+
+        applied = true;
+        if (logger) {
+            logger->info("Applied PWM7 backlight brightness " + std::to_string(clamped) + "% via " + ent->d_name);
+        }
+        break;
+    }
+
+    closedir(dir);
+    return applied;
+}
 
 std::string read_first_kv_value(const std::string &path, const char *key_prefix) {
     FILE *f = fopen(path.c_str(), "r");
@@ -79,10 +194,23 @@ struct LangPack {
     std::map<std::string, std::string> strings;
 };
 
+struct ThemePack {
+    Theme theme;
+    bool builtin;
+
+    ThemePack() : theme(), builtin(false) {}
+};
+
 std::string language_dir_path() {
     const char *env = getenv("INCONSOLE_DATA_ROOT");
     const std::string root = (env && env[0] != '\0') ? std::string(env) : std::string("/userdata");
     return root + "/system/languages";
+}
+
+std::string theme_dir_path() {
+    const char *env = getenv("INCONSOLE_DATA_ROOT");
+    const std::string root = (env && env[0] != '\0') ? std::string(env) : std::string("/userdata");
+    return root + "/themes";
 }
 
 bool extract_object(const std::string &json, const std::string &key, std::string *out) {
@@ -107,6 +235,38 @@ std::vector<std::string> &lang_order_cache() {
 bool &lang_loaded_flag() {
     static bool loaded = false;
     return loaded;
+}
+
+std::map<std::string, ThemePack> &theme_cache() {
+    static std::map<std::string, ThemePack> cache;
+    return cache;
+}
+
+std::vector<std::string> &theme_order_cache() {
+    static std::vector<std::string> order;
+    return order;
+}
+
+bool &theme_loaded_flag() {
+    static bool loaded = false;
+    return loaded;
+}
+
+bool parse_theme_motion(const std::string &raw) {
+    std::string norm = raw;
+    for (size_t i = 0; i < norm.size(); ++i) {
+        norm[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(norm[i])));
+    }
+    return norm == "flow" || norm == "wave" || norm == "animated" || norm == "1" || norm == "true";
+}
+
+void register_theme_pack(const ThemePack &pack) {
+    std::map<std::string, ThemePack> &cache = theme_cache();
+    std::vector<std::string> &order = theme_order_cache();
+    const std::string id = pack.theme.id;
+    if (id.empty()) return;
+    if (cache.count(id) == 0) order.push_back(id);
+    cache[id] = pack;
 }
 
 void ensure_languages_loaded() {
@@ -198,6 +358,40 @@ bool extract_bool(const std::string &json, const std::string &key, bool *out) {
     return true;
 }
 
+bool parse_hex_byte(const std::string &s, size_t off, uint8_t *out) {
+    if (!out || off + 2 > s.size()) return false;
+    const std::string part = s.substr(off, 2);
+    char *end = nullptr;
+    long value = strtol(part.c_str(), &end, 16);
+    if (!end || *end != '\0' || value < 0 || value > 255) return false;
+    *out = static_cast<uint8_t>(value);
+    return true;
+}
+
+bool parse_color_value(const std::string &raw, Color *out) {
+    if (!out) return false;
+    std::string s = raw;
+    s.erase(std::remove_if(s.begin(), s.end(), [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }), s.end());
+    if (s.empty()) return false;
+    if (s[0] == '#') s.erase(s.begin());
+    if (s.size() == 6) {
+        return parse_hex_byte(s, 0, &out->r) && parse_hex_byte(s, 2, &out->g) && parse_hex_byte(s, 4, &out->b);
+    }
+    std::regex rgb_re("\\[([0-9]{1,3}),([0-9]{1,3}),([0-9]{1,3})\\]");
+    std::smatch m;
+    if (!std::regex_match(s, m, rgb_re) || m.size() < 4) return false;
+    out->r = static_cast<uint8_t>(std::max(0, std::min(255, atoi(m[1].str().c_str()))));
+    out->g = static_cast<uint8_t>(std::max(0, std::min(255, atoi(m[2].str().c_str()))));
+    out->b = static_cast<uint8_t>(std::max(0, std::min(255, atoi(m[3].str().c_str()))));
+    return true;
+}
+
+bool extract_color(const std::string &json, const std::string &key, Color *out) {
+    std::string value;
+    if (!extract_string(json, key, &value)) return false;
+    return parse_color_value(value, out);
+}
+
 std::vector<std::string> extract_string_array(const std::string &json, const std::string &key) {
     std::vector<std::string> out;
     std::regex re("\"" + key + "\"\\s*:\\s*\\[(.*?)\\]");
@@ -275,15 +469,21 @@ AppEntry::AppEntry() : order(1000), builtin(false), exclusive_runtime(false) {}
 
 Theme::Theme()
     : id("tech_noir"),
+      display_name("Tech Noir"),
       background_top{8, 14, 26},
       background_bottom{5, 9, 17},
       background_glow{44, 132, 208},
+      background_wave_a{72, 120, 170},
+      background_wave_b{28, 72, 126},
       panel_top{22, 33, 50},
       panel_bottom{14, 22, 35},
       panel_border{78, 106, 142},
       panel_focus_top{40, 68, 102},
       panel_focus_bottom{24, 44, 72},
       panel_focus_border{132, 184, 242},
+      glow_soft{88, 144, 214},
+      shadow{6, 10, 20},
+      overlay{14, 18, 28},
       text_primary{233, 240, 250},
       text_muted{150, 172, 199},
       text_invert{16, 20, 30},
@@ -293,13 +493,16 @@ Theme::Theme()
       danger{246, 112, 122},
       footer_top{18, 28, 42},
       footer_bottom{11, 18, 28},
-      footer_border{62, 84, 114} {}
+      footer_border{62, 84, 114},
+      corner_radius(10),
+      panel_alpha(232),
+      background_motion(1) {}
 
 Typography::Typography() : small_px(14), large_px(20), line_small(16), line_large(22), hint_chars(56) {}
 
 LayoutMetrics::LayoutMetrics() : safe(), top_bar(), content(), footer(), gap(6), grid_cols(3), grid_rows(2) {}
 
-Settings::Settings() : language("pl"), theme_id("tech_noir"), volume(70), brightness(80), animations(true) {}
+Settings::Settings() : language("pl"), theme_id("midnight_violet"), volume(80), brightness(80), animations(true) {}
 
 Profile::Profile() : username("Player1"), pin_enabled(false), pin("0000") {}
 
@@ -395,48 +598,119 @@ bool SettingsStore::save(const Settings &settings, Logger *logger) const {
 }
 
 bool SettingsStore::apply_volume(int volume, Logger *logger) const {
+    struct MixerPercentControl {
+        const char *name;
+    };
+    struct MixerSwitchControl {
+        const char *name;
+        const char *value;
+    };
+
     int clamped = std::max(0, std::min(100, volume));
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "amixer -q sset Master %d%% >/dev/null 2>&1", clamped);
-    const int rc = system(cmd);
-    if (logger) {
-        if (rc == 0) {
-            logger->info("Applied volume: " + std::to_string(clamped) + "%");
-        } else {
-            logger->warn("Unable to apply volume via amixer");
+    const MixerPercentControl percent_controls[] = {
+        {"Headphone Playback Volume"},
+        {"DAC Front Playback Volume"},
+        {"DAC Playback Volume"},
+        {"Master"},
+        {"Speaker"},
+        {"Headphone"},
+        {"PCM"},
+        {"DAC"},
+    };
+    const MixerSwitchControl switch_controls[] = {
+        {"Headphone Playback Switch", (clamped > 0) ? "on" : "off"},
+        {"Speaker Playback Switch", (clamped > 0) ? "on" : "off"},
+    };
+    const char *debug_controls[] = {
+        "Headphone Playback Volume",
+        "DAC Front Playback Volume",
+        "DAC Playback Volume",
+        "Headphone Playback Switch",
+        "Speaker Playback Switch",
+    };
+
+    bool applied = false;
+    bool have_snd_control = (access("/dev/snd/controlC0", F_OK) == 0);
+    std::vector<std::string> touched_controls;
+
+    for (size_t i = 0; i < sizeof(percent_controls) / sizeof(percent_controls[0]); ++i) {
+        const std::string quoted = shell_single_quote(percent_controls[i].name);
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "amixer -q sset %s %d%% >/dev/null 2>&1",
+                 quoted.c_str(), clamped);
+        if (system(cmd) == 0) {
+            applied = true;
+            touched_controls.push_back(percent_controls[i].name);
         }
     }
-    return rc == 0;
+
+    for (size_t i = 0; i < sizeof(switch_controls) / sizeof(switch_controls[0]); ++i) {
+        const std::string quoted = shell_single_quote(switch_controls[i].name);
+        char cmd[256];
+        snprintf(cmd, sizeof(cmd), "amixer -q sset %s %s >/dev/null 2>&1",
+                 quoted.c_str(), switch_controls[i].value);
+        if (system(cmd) == 0) {
+            applied = true;
+            touched_controls.push_back(switch_controls[i].name);
+        }
+    }
+
+    if (logger) {
+        if (applied) {
+            std::ostringstream summary;
+            summary << "Applied volume: " << clamped << "% via";
+            for (size_t i = 0; i < touched_controls.size(); ++i) {
+                summary << (i == 0 ? " " : ", ") << touched_controls[i];
+            }
+            logger->info(summary.str());
+
+            for (size_t i = 0; i < sizeof(debug_controls) / sizeof(debug_controls[0]); ++i) {
+                const std::string quoted = shell_single_quote(debug_controls[i]);
+                int status = 0;
+                std::string output = run_command_capture("amixer sget " + quoted + " 2>/dev/null", &status);
+                if (status == 0 && !output.empty()) {
+                    logger->info(std::string("Mixer state ") + debug_controls[i] + ": " + collapse_ws(output));
+                }
+            }
+        } else {
+            if (have_snd_control) {
+                logger->warn("Unable to apply volume via amixer");
+            } else {
+                logger->warn("Unable to apply volume via amixer; /dev/snd/controlC0 is missing");
+            }
+        }
+    }
+    return applied;
 }
 
 bool SettingsStore::apply_brightness(int brightness, Logger *logger) const {
     int clamped = std::max(0, std::min(100, brightness));
     DIR *dir = opendir("/sys/class/backlight");
-    if (!dir) {
-        if (logger) logger->warn("Backlight sysfs not found");
-        return false;
-    }
-
     bool applied = false;
-    struct dirent *ent = nullptr;
-    while ((ent = readdir(dir)) != nullptr) {
-        if (ent->d_name[0] == '.') continue;
-        std::string base = std::string("/sys/class/backlight/") + ent->d_name;
+    if (dir) {
+        struct dirent *ent = nullptr;
+        while ((ent = readdir(dir)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            std::string base = std::string("/sys/class/backlight/") + ent->d_name;
 
-        int max_brightness = 0;
-        if (!read_file_int(base + "/max_brightness", &max_brightness) || max_brightness <= 0) continue;
+            int max_brightness = 0;
+            if (!read_file_int(base + "/max_brightness", &max_brightness) || max_brightness <= 0) continue;
 
-        int value = (clamped * max_brightness) / 100;
-        std::ostringstream ss;
-        ss << value << "\n";
-        if (write_text_file(base + "/brightness", ss.str())) {
-            applied = true;
-            if (logger) logger->info("Applied brightness " + std::to_string(clamped) + "% on " + ent->d_name);
-            break;
+            int value = (clamped * max_brightness) / 100;
+            std::ostringstream ss;
+            ss << value << "\n";
+            if (write_text_file(base + "/brightness", ss.str())) {
+                applied = true;
+                if (logger) logger->info("Applied brightness " + std::to_string(clamped) + "% on " + ent->d_name);
+                break;
+            }
         }
+        closedir(dir);
+    } else if (logger) {
+        logger->warn("Backlight sysfs not found; trying PWM fallback");
     }
 
-    closedir(dir);
+    if (!applied) applied = write_pwm_backlight_percent(clamped, logger);
     if (!applied && logger) logger->warn("Unable to apply brightness");
     return applied;
 }
@@ -583,7 +857,9 @@ void Registry::scan(const std::string &apps_dir, Logger *logger) {
     std::string cpu = read_first_kv_value("/proc/cpuinfo", "model name");
     if (cpu.empty()) cpu = read_first_kv_value("/proc/cpuinfo", "Hardware");
     if (cpu.empty()) cpu = "Unknown";
-    const int app_count = static_cast<int>(apps_.size());
+    const int app_count = static_cast<int>(std::count_if(apps_.begin(), apps_.end(), [](const AppEntry &app) {
+        return !app.builtin;
+    }));
     for (size_t i = 0; i < apps_.size(); ++i) {
         if (apps_[i].id != "system.info") continue;
         std::ostringstream d;
@@ -903,56 +1179,119 @@ std::string translate_ui_text(const std::string &language, const std::string &ke
 }
 
 std::string normalize_theme_id(const std::string &theme_id) {
-    std::string norm = theme_id;
-    for (size_t i = 0; i < norm.size(); ++i) {
-        char c = static_cast<char>(std::tolower(static_cast<unsigned char>(norm[i])));
+    std::string norm;
+    norm.reserve(theme_id.size());
+    for (size_t i = 0; i < theme_id.size(); ++i) {
+        char c = static_cast<char>(std::tolower(static_cast<unsigned char>(theme_id[i])));
         if (c == '-') c = '_';
-        norm[i] = c;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+            norm.push_back(c);
+        }
     }
-    if (norm == "tech_noir") return "tech_noir";
-    if (norm == "graphite_light") return "graphite_light";
-    if (norm == "retro_arcade") return "retro_arcade";
-    return "tech_noir";
+    if (norm.empty()) return "midnight_violet";
+    return norm;
 }
 
-const Theme &theme_by_id(const std::string &theme_id) {
-    static Theme tech = [] {
-        Theme t;
+std::vector<std::string> available_theme_ids() {
+    if (theme_loaded_flag()) return theme_order_cache();
+    theme_loaded_flag() = true;
+    theme_cache().clear();
+    theme_order_cache().clear();
+
+    ThemePack tech = [] {
+        ThemePack pack;
+        pack.builtin = true;
+        Theme t = Theme();
         t.id = "tech_noir";
-        t.background_top = {18, 24, 34};
-        t.background_bottom = {12, 16, 24};
-        t.background_glow = {72, 120, 170};
-        t.panel_top = {36, 44, 58};
-        t.panel_bottom = {24, 30, 40};
-        t.panel_border = {78, 92, 112};
-        t.panel_focus_top = {54, 72, 96};
-        t.panel_focus_bottom = {34, 46, 62};
-        t.panel_focus_border = {134, 176, 220};
+        t.display_name = "Tech Noir";
+        t.background_top = {16, 22, 34};
+        t.background_bottom = {8, 12, 20};
+        t.background_glow = {78, 120, 184};
+        t.background_wave_a = {48, 92, 170};
+        t.background_wave_b = {28, 64, 122};
+        t.panel_top = {28, 34, 48};
+        t.panel_bottom = {18, 22, 34};
+        t.panel_border = {72, 88, 116};
+        t.panel_focus_top = {44, 56, 82};
+        t.panel_focus_bottom = {24, 34, 56};
+        t.panel_focus_border = {124, 170, 226};
+        t.glow_soft = {78, 132, 204};
+        t.shadow = {4, 8, 14};
+        t.overlay = {12, 18, 28};
         t.text_primary = {236, 240, 246};
-        t.text_muted = {162, 172, 186};
+        t.text_muted = {158, 172, 190};
         t.text_invert = {16, 20, 30};
         t.accent = {110, 176, 238};
         t.ok = {120, 210, 142};
         t.warn = {232, 186, 104};
         t.danger = {230, 110, 120};
-        t.footer_top = {30, 38, 50};
-        t.footer_bottom = {20, 26, 36};
-        t.footer_border = {72, 86, 104};
-        return t;
+        t.footer_top = {24, 30, 42};
+        t.footer_bottom = {14, 18, 28};
+        t.footer_border = {62, 76, 98};
+        t.corner_radius = 11;
+        t.panel_alpha = 226;
+        t.background_motion = 1;
+        pack.theme = t;
+        return pack;
     }();
 
-    static Theme light = [] {
-        Theme t = tech;
+    ThemePack violet = [] {
+        ThemePack pack;
+        pack.builtin = true;
+        Theme t = Theme();
+        t.id = "midnight_violet";
+        t.display_name = "Midnight Violet";
+        t.background_top = {10, 8, 22};
+        t.background_bottom = {4, 4, 11};
+        t.background_glow = {82, 56, 164};
+        t.background_wave_a = {106, 72, 198};
+        t.background_wave_b = {42, 38, 116};
+        t.panel_top = {28, 20, 42};
+        t.panel_bottom = {16, 12, 28};
+        t.panel_border = {88, 76, 136};
+        t.panel_focus_top = {44, 28, 72};
+        t.panel_focus_bottom = {22, 14, 38};
+        t.panel_focus_border = {170, 142, 255};
+        t.glow_soft = {126, 102, 240};
+        t.shadow = {4, 2, 10};
+        t.overlay = {18, 10, 28};
+        t.text_primary = {244, 238, 255};
+        t.text_muted = {178, 164, 212};
+        t.text_invert = {16, 14, 22};
+        t.accent = {170, 126, 255};
+        t.ok = {118, 220, 160};
+        t.warn = {244, 192, 108};
+        t.danger = {242, 120, 144};
+        t.footer_top = {22, 16, 34};
+        t.footer_bottom = {12, 10, 20};
+        t.footer_border = {70, 58, 108};
+        t.corner_radius = 13;
+        t.panel_alpha = 220;
+        t.background_motion = 1;
+        pack.theme = t;
+        return pack;
+    }();
+
+    ThemePack light = [] {
+        ThemePack pack;
+        pack.builtin = true;
+        Theme t = Theme();
         t.id = "graphite_light";
+        t.display_name = "Graphite Light";
         t.background_top = {234, 238, 244};
         t.background_bottom = {216, 223, 232};
         t.background_glow = {178, 194, 214};
+        t.background_wave_a = {196, 208, 228};
+        t.background_wave_b = {174, 188, 212};
         t.panel_top = {252, 253, 255};
         t.panel_bottom = {236, 240, 247};
         t.panel_border = {156, 168, 186};
         t.panel_focus_top = {245, 250, 255};
         t.panel_focus_bottom = {222, 235, 248};
         t.panel_focus_border = {96, 136, 182};
+        t.glow_soft = {140, 164, 208};
+        t.shadow = {120, 132, 156};
+        t.overlay = {208, 216, 228};
         t.text_primary = {24, 34, 48};
         t.text_muted = {82, 96, 118};
         t.text_invert = {248, 250, 255};
@@ -963,19 +1302,101 @@ const Theme &theme_by_id(const std::string &theme_id) {
         t.footer_top = {232, 238, 246};
         t.footer_bottom = {220, 228, 238};
         t.footer_border = {152, 166, 186};
-        return t;
+        t.corner_radius = 12;
+        t.panel_alpha = 235;
+        t.background_motion = 1;
+        pack.theme = t;
+        return pack;
     }();
 
-    static Theme retro = [] {
-        Theme t = tech;
-        t.id = "retro_arcade";
-        return t;
-    }();
+    ThemePack retro = tech;
+    retro.theme.id = "retro_arcade";
+    retro.theme.display_name = "Retro Arcade";
+    retro.theme.background_wave_a = {78, 44, 146};
+    retro.theme.background_wave_b = {24, 58, 118};
+    retro.theme.accent = {136, 108, 255};
 
+    register_theme_pack(violet);
+    register_theme_pack(tech);
+    register_theme_pack(light);
+    register_theme_pack(retro);
+
+    DIR *dir = opendir(theme_dir_path().c_str());
+    if (dir) {
+        struct dirent *ent = nullptr;
+        while ((ent = readdir(dir)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            const std::string subdir = ent->d_name;
+            const std::string theme_path = theme_dir_path() + "/" + subdir + "/theme.json";
+            const std::string json = read_text_file(theme_path);
+            if (json.empty()) continue;
+
+            ThemePack pack;
+            pack.builtin = false;
+            Theme theme = violet.theme;
+            theme.id = normalize_theme_id(subdir);
+            theme.display_name = theme.id;
+
+            std::string id;
+            std::string display_name;
+            std::string motion;
+            int corner_radius = 0;
+            int panel_alpha = 0;
+            if (extract_string(json, "id", &id) && !id.empty()) theme.id = normalize_theme_id(id);
+            if (extract_string(json, "name", &display_name) && !display_name.empty()) theme.display_name = display_name;
+            if (extract_string(json, "display_name", &display_name) && !display_name.empty()) theme.display_name = display_name;
+            if (extract_color(json, "background_top", &theme.background_top)) {}
+            if (extract_color(json, "background_bottom", &theme.background_bottom)) {}
+            if (extract_color(json, "background_glow", &theme.background_glow)) {}
+            if (extract_color(json, "background_wave_a", &theme.background_wave_a)) {}
+            if (extract_color(json, "background_wave_b", &theme.background_wave_b)) {}
+            if (extract_color(json, "panel_top", &theme.panel_top)) {}
+            if (extract_color(json, "panel_bottom", &theme.panel_bottom)) {}
+            if (extract_color(json, "panel_border", &theme.panel_border)) {}
+            if (extract_color(json, "panel_focus_top", &theme.panel_focus_top)) {}
+            if (extract_color(json, "panel_focus_bottom", &theme.panel_focus_bottom)) {}
+            if (extract_color(json, "panel_focus_border", &theme.panel_focus_border)) {}
+            if (extract_color(json, "glow_soft", &theme.glow_soft)) {}
+            if (extract_color(json, "shadow", &theme.shadow)) {}
+            if (extract_color(json, "overlay", &theme.overlay)) {}
+            if (extract_color(json, "text_primary", &theme.text_primary)) {}
+            if (extract_color(json, "text_muted", &theme.text_muted)) {}
+            if (extract_color(json, "text_invert", &theme.text_invert)) {}
+            if (extract_color(json, "accent", &theme.accent)) {}
+            if (extract_color(json, "ok", &theme.ok)) {}
+            if (extract_color(json, "warn", &theme.warn)) {}
+            if (extract_color(json, "danger", &theme.danger)) {}
+            if (extract_color(json, "footer_top", &theme.footer_top)) {}
+            if (extract_color(json, "footer_bottom", &theme.footer_bottom)) {}
+            if (extract_color(json, "footer_border", &theme.footer_border)) {}
+            if (extract_int(json, "corner_radius", &corner_radius)) theme.corner_radius = std::max(0, std::min(24, corner_radius));
+            if (extract_int(json, "panel_alpha", &panel_alpha)) theme.panel_alpha = std::max(96, std::min(255, panel_alpha));
+            if (extract_string(json, "background_motion", &motion)) theme.background_motion = parse_theme_motion(motion) ? 1 : 0;
+            pack.theme = theme;
+            register_theme_pack(pack);
+        }
+        closedir(dir);
+    }
+
+    return theme_order_cache();
+}
+
+std::string theme_label(const std::string &theme_id) {
+    available_theme_ids();
     const std::string norm = normalize_theme_id(theme_id);
-    if (norm == "graphite_light") return light;
-    if (norm == "retro_arcade") return retro;
-    return tech;
+    std::map<std::string, ThemePack> &cache = theme_cache();
+    std::map<std::string, ThemePack>::const_iterator it = cache.find(norm);
+    if (it != cache.end() && !it->second.theme.display_name.empty()) return it->second.theme.display_name;
+    return norm;
+}
+
+const Theme &theme_by_id(const std::string &theme_id) {
+    available_theme_ids();
+    const std::string norm = normalize_theme_id(theme_id);
+    std::map<std::string, ThemePack> &cache = theme_cache();
+    std::map<std::string, ThemePack>::const_iterator it = cache.find(norm);
+    if (it != cache.end()) return it->second.theme;
+    return cache.find("midnight_violet")->second.theme;
 }
 
 const Typography &default_typography() {

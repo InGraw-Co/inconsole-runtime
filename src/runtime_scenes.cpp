@@ -28,6 +28,9 @@ float clamp01(float v) {
     return v;
 }
 
+std::string trim_copy(const std::string &in);
+std::string lower_copy(const std::string &in);
+
 Color mix_color(const Color &a, const Color &b, float t) {
     const float k = clamp01(t);
     Color out;
@@ -50,16 +53,51 @@ std::string tr(const Settings *settings, const char *pl, const char *en) {
     return translate_ui_text(lang, std::string(en), std::string(en));
 }
 
+bool any_input_activity(const InputSnapshot &input) {
+    return input.hold_up || input.hold_down || input.hold_left || input.hold_right || input.hold_a || input.hold_b ||
+           input.hold_start || input.hold_select || input.hold_l || input.hold_r || input.hold_joy || input.nav_up ||
+           input.nav_down || input.nav_left || input.nav_right || input.accept || input.back || input.menu ||
+           std::abs(input.axis_x_render) > 600 || std::abs(input.axis_y_render) > 600;
+}
+
+std::string localized_battery_status(const Settings *settings, const BatteryInfo &battery) {
+    const std::string status = lower_copy(trim_copy(battery.status));
+    if (status == "charging") return tr(settings, "Ładowanie", "Charging");
+    if (status == "full") return tr(settings, "Pełna", "Full");
+    if (status == "discharging") return tr(settings, "Rozładowanie", "Discharging");
+    if (status == "not charging") return tr(settings, "Nie ładuje", "Not charging");
+    return battery.status.empty() ? tr(settings, "Brak danych", "No data") : battery.status;
+}
+
 const Theme &ui_theme(const Settings *settings) {
-    if (!settings) return theme_by_id("tech_noir");
+    if (!settings) return theme_by_id("midnight_violet");
     return theme_by_id(settings->theme_id);
 }
 
+void draw_text_with_shadow(Renderer *renderer, const std::string &text, int x, int y, const Theme &theme, bool large = false) {
+    renderer->draw_text(text, x + 1, y + 1, mix_color(theme.shadow, theme.background_bottom, 0.15f), large);
+    renderer->draw_text(text, x, y, theme.text_primary, large);
+}
+
 void draw_card(Renderer *renderer, const LayoutRect &r, const Theme &theme, bool focused) {
-    const Color top = focused ? mix_color(theme.panel_focus_top, theme.accent, 0.10f) : theme.panel_top;
-    const Color bottom = focused ? mix_color(theme.panel_focus_bottom, Color{0, 0, 0}, 0.10f) : theme.panel_bottom;
-    const Color border = focused ? theme.panel_focus_border : theme.panel_border;
-    renderer->draw_panel_cached(focused ? "focus" : "normal", r.x, r.y, r.w, r.h, top, bottom, border);
+    const Color top = focused ? mix_color(theme.panel_focus_top, theme.accent, 0.08f) : mix_color(theme.panel_top, Color{255, 255, 255}, 0.04f);
+    const Color bottom = focused ? mix_color(theme.panel_focus_bottom, Color{0, 0, 0}, 0.04f) : theme.panel_bottom;
+    const Color border = focused ? theme.panel_focus_border : mix_color(theme.panel_border, theme.background_bottom, 0.20f);
+    renderer->draw_panel_cached(focused ? "focus" : "normal",
+                                r.x,
+                                r.y,
+                                r.w,
+                                r.h,
+                                top,
+                                bottom,
+                                border,
+                                theme.corner_radius,
+                                static_cast<uint8_t>(theme.panel_alpha),
+                                focused);
+    if (focused && r.h >= 14) {
+        renderer->fill_rect(r.x + theme.corner_radius, r.y + 2, std::max(1, r.w - theme.corner_radius * 2), 1,
+                            mix_color(theme.glow_soft, Color{255, 255, 255}, 0.18f));
+    }
 }
 
 void draw_soft_separator(Renderer *renderer, int x, int y, int w, const Theme &theme) {
@@ -111,7 +149,7 @@ void draw_top_bar(Renderer *renderer,
                   int battery_percent) {
     const LayoutRect bar = layout.top_bar;
     draw_card(renderer, bar, theme, false);
-    renderer->draw_text(left_title, bar.x + 10, bar.y + 8, theme.text_primary, true);
+    draw_text_with_shadow(renderer, left_title, bar.x + 10, bar.y + 8, theme, true);
     draw_battery_icon(renderer, bar.right() - 86, bar.y + 11, 20, 10, battery_percent, theme);
     const std::string battery_text = battery_percent < 0 ? "--" : std::to_string(std::max(0, std::min(100, battery_percent))) + "%";
     renderer->draw_text(battery_text, bar.right() - 60, bar.y + 8, theme.text_muted);
@@ -122,16 +160,48 @@ void draw_top_bar(Renderer *renderer,
 }
 
 void draw_footer(Renderer *renderer, const LayoutMetrics &layout, const Theme &theme, const std::string &hint) {
-    draw_card(renderer, layout.footer, theme, false);
+    renderer->draw_panel_cached("footer",
+                                layout.footer.x,
+                                layout.footer.y,
+                                layout.footer.w,
+                                layout.footer.h,
+                                mix_color(theme.footer_top, theme.panel_top, 0.22f),
+                                mix_color(theme.footer_bottom, theme.panel_bottom, 0.18f),
+                                mix_color(theme.footer_border, theme.background_bottom, 0.28f),
+                                std::max(6, theme.corner_radius - 2),
+                                static_cast<uint8_t>(std::max(110, theme.panel_alpha - 52)),
+                                false);
     const std::string text = renderer->ellipsize_to_width(hint, layout.footer.w - 10, false);
     renderer->draw_text(text, layout.footer.x + 6, layout.footer.y + 5, theme.text_muted);
 }
 
-void render_static_background(Renderer *renderer, const Theme &theme) {
+void render_static_background(Renderer *renderer, const Theme &theme, uint32_t now_ms) {
     renderer->draw_background_cached(theme.id,
                                      mix_color(theme.background_top, Color{255, 255, 255}, 0.04f),
                                      mix_color(theme.background_bottom, Color{0, 0, 0}, 0.05f),
                                      mix_color(theme.background_bottom, Color{0, 0, 0}, 0.18f));
+    if (theme.background_motion == 0) return;
+
+    const float t = static_cast<float>(now_ms) * 0.001f;
+    const int w = renderer->width();
+    const int h = renderer->height();
+    for (int band = 0; band < 3; ++band) {
+        const float speed = 0.65f + static_cast<float>(band) * 0.18f;
+        const float phase = t * speed + static_cast<float>(band) * 1.7f;
+        const Color band_color = (band % 2 == 0) ? theme.background_wave_a : theme.background_wave_b;
+        for (int y = 0; y < h; y += 2) {
+            const float yf = static_cast<float>(y) / static_cast<float>(std::max(1, h - 1));
+            const float curve = std::sin(yf * 7.8f + phase) * 0.5f + std::sin(yf * 3.4f - phase * 1.13f) * 0.5f;
+            const int center = static_cast<int>(static_cast<float>(w) * (0.50f + curve * (0.18f + band * 0.035f)));
+            const int width = static_cast<int>((0.24f - yf * 0.08f + band * 0.04f) * static_cast<float>(w));
+            const int x = std::max(-width / 2, center - width / 2);
+            const int draw_w = std::min(w - std::max(0, x), width);
+            if (draw_w <= 0) continue;
+            const float fade = std::max(0.0f, 1.0f - std::fabs(yf - (0.26f + band * 0.2f)) * 2.4f);
+            const Color shaded = mix_color(theme.background_bottom, band_color, 0.10f + fade * 0.24f);
+            renderer->fill_rect(std::max(0, x), y, draw_w, 2, shaded);
+        }
+    }
 }
 
 std::string safe_username(const Profile *profile) {
@@ -385,13 +455,13 @@ int env_int_clamped(const char *name, int fallback, int min_value, int max_value
 
 uint32_t scene_fade_phase_ms() {
     static const uint32_t value =
-        static_cast<uint32_t>(env_int_clamped("INCONSOLE_SCENE_FADE_MS", 120, 60, 600));
+        static_cast<uint32_t>(env_int_clamped("INCONSOLE_SCENE_FADE_MS", 80, 40, 240));
     return value;
 }
 
 uint8_t scene_fade_max_alpha() {
     static const uint8_t value =
-        static_cast<uint8_t>(env_int_clamped("INCONSOLE_SCENE_FADE_ALPHA", 120, 40, 220));
+        static_cast<uint8_t>(env_int_clamped("INCONSOLE_SCENE_FADE_ALPHA", 88, 20, 160));
     return value;
 }
 
@@ -474,16 +544,31 @@ void draw_system_chip(Renderer *renderer, const LayoutRect &r, const Theme &them
     } else if (kind == 4) {
         path = icon_root + "/files.png";
         fallback = data_root + "/system/icons/files.png";
+    } else if (kind == 5) {
+        path.clear();
+        fallback.clear();
     }
     const int icon_size = r.w - 8;
     const int icon_x = r.x + (r.w - icon_size) / 2;
     const int icon_y = r.y + (r.h - icon_size) / 2;
-    if (file_readable_cached(path)) {
+    if (kind == 5) {
+        const Color fg = focused ? theme.text_primary : theme.text_muted;
+        const int body_x = r.x + 7;
+        const int body_y = r.y + 8;
+        const int body_w = r.w - 12;
+        const int body_h = r.h - 14;
+        renderer->draw_rect_outline(body_x, body_y, body_w, body_h, fg);
+        renderer->fill_rect(body_x + body_w, body_y + body_h / 3, 2, std::max(2, body_h / 3), fg);
+        renderer->fill_rect(body_x + 2, body_y + 2, std::max(1, ((body_w - 4) * 7) / 10), std::max(1, body_h - 4),
+                            mix_color(theme.ok, fg, 0.35f));
+        renderer->fill_rect(r.x + r.w / 2 - 1, r.y + 4, 2, 4, fg);
+        renderer->fill_rect(r.x + r.w / 2 - 3, r.y + 6, 6, 2, fg);
+    } else if (file_readable_cached(path)) {
         renderer->draw_icon(path, icon_x, icon_y, icon_size, icon_size);
     } else if (file_readable_cached(fallback)) {
         renderer->draw_icon(fallback, icon_x, icon_y, icon_size, icon_size);
     } else {
-        renderer->draw_text_centered(kind == 0 ? "S" : (kind == 1 ? "D" : (kind == 2 ? "I" : (kind == 3 ? "P" : "F"))),
+        renderer->draw_text_centered(kind == 0 ? "S" : (kind == 1 ? "D" : (kind == 2 ? "I" : (kind == 3 ? "P" : (kind == 4 ? "F" : "C")))),
                                      r.x + r.w / 2,
                                      r.y + 6,
                                      focused ? theme.text_primary : theme.text_muted,
@@ -560,7 +645,8 @@ int move_keyboard_focus(const std::vector<KeyboardKey> &keys, int current_idx, i
 
 }  // namespace
 
-SceneOutput::SceneOutput() : request_scene(false), next_scene(SCENE_LAUNCHER), request_launch(false), launch_app(), request_restart(false) {}
+SceneOutput::SceneOutput()
+    : request_scene(false), next_scene(SCENE_LAUNCHER), request_launch(false), launch_app(), request_restart(false), post_frame_delay_ms(0) {}
 
 WizardScene::WizardScene(Profile *profile,
                          ProfileStore *profile_store,
@@ -645,7 +731,15 @@ void WizardScene::on_enter() {
         }
     }
     language_cursor_t_ = static_cast<float>(language_selected_);
-    theme_selected_ = normalize_theme_id(settings_->theme_id) == "graphite_light" ? 1 : 0;
+    theme_ids_ = available_theme_ids();
+    if (theme_ids_.empty()) theme_ids_.push_back("midnight_violet");
+    theme_selected_ = 0;
+    for (size_t i = 0; i < theme_ids_.size(); ++i) {
+        if (theme_ids_[i] == normalize_theme_id(settings_->theme_id)) {
+            theme_selected_ = static_cast<int>(i);
+            break;
+        }
+    }
     theme_cursor_t_ = static_cast<float>(theme_selected_);
     pin_choice_selected_ = 0;
     pin_choice_cursor_t_ = 0.0f;
@@ -933,9 +1027,11 @@ SceneOutput WizardScene::update(const InputSnapshot &input, uint32_t now_ms) {
     }
 
     if (step_ == STEP_THEME) {
+        if (theme_ids_.empty()) theme_ids_ = available_theme_ids();
+        const int max_theme = std::max(0, static_cast<int>(theme_ids_.size()) - 1);
         if (input.nav_left) theme_selected_ = std::max(0, theme_selected_ - 1);
-        if (input.nav_right) theme_selected_ = std::min(1, theme_selected_ + 1);
-        settings_->theme_id = theme_selected_ == 1 ? "graphite_light" : "tech_noir";
+        if (input.nav_right) theme_selected_ = std::min(max_theme, theme_selected_ + 1);
+        settings_->theme_id = theme_ids_.empty() ? std::string("midnight_violet") : theme_ids_[theme_selected_];
         theme_cursor_t_ += (static_cast<float>(theme_selected_) - theme_cursor_t_) * 0.22f;
         if (input.accept || input.menu) step_ = STEP_NAME;
         if (input.back) step_ = STEP_LANGUAGE;
@@ -1118,7 +1214,7 @@ void WizardScene::update_install_phase(uint32_t now_ms) {
 
 void WizardScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot) {
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
     LayoutGuard guard("wizard", renderer->width(), renderer->height());
@@ -1220,15 +1316,39 @@ void WizardScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSna
 
     if (step_ == STEP_THEME) {
         renderer->draw_text_centered(tr(settings_, "Wybór motywu", "Theme"), body.x + body.w / 2, body.y + 20, theme.text_primary, true);
-        LayoutRect dark(body.x + 46, body.y + 58, 160, 60);
-        LayoutRect light(body.right() - 206, body.y + 58, 160, 60);
-        const bool is_light = theme_selected_ == 1;
-        draw_card(renderer, dark, theme, !is_light);
-        draw_card(renderer, light, theme, is_light);
-        renderer->draw_text_centered(tr(settings_, "Ciemny", "Dark"), dark.x + dark.w / 2, dark.y + 20, theme.text_primary);
-        renderer->draw_text_centered(tr(settings_, "Jasny", "Light"), light.x + light.w / 2, light.y + 20, theme.text_primary);
-        const int marker_x = static_cast<int>((static_cast<float>(dark.x) * (1.0f - theme_cursor_t_)) + (static_cast<float>(light.x) * theme_cursor_t_));
-        renderer->fill_rect(marker_x, dark.bottom() + 4, dark.w, 2, theme.accent);
+        if (theme_ids_.empty()) theme_ids_ = available_theme_ids();
+        const int box_w = 150;
+        const int box_h = 72;
+        const int center_x = body.x + body.w / 2;
+        const int y = body.y + 54;
+        const float spacing = static_cast<float>(box_w + 18);
+        for (int i = 0; i < static_cast<int>(theme_ids_.size()); ++i) {
+            const float rel = static_cast<float>(i) - theme_cursor_t_;
+            if (std::fabs(rel) > 1.8f) continue;
+            const int x = center_x + static_cast<int>(rel * spacing) - box_w / 2;
+            const LayoutRect card(x, y, box_w, box_h);
+            const bool focused = std::fabs(rel) < 0.4f;
+            const Theme &preview = theme_by_id(theme_ids_[i]);
+            renderer->draw_panel_cached("wizard-theme-" + theme_ids_[i],
+                                        card.x,
+                                        card.y,
+                                        card.w,
+                                        card.h,
+                                        preview.panel_top,
+                                        preview.panel_bottom,
+                                        focused ? preview.panel_focus_border : preview.panel_border,
+                                        preview.corner_radius,
+                                        static_cast<uint8_t>(preview.panel_alpha),
+                                        focused);
+            renderer->fill_rect(card.x + 10, card.y + 12, 22, 8, preview.accent);
+            renderer->fill_rect(card.x + 10, card.y + 26, card.w - 20, 4, mix_color(preview.background_wave_a, preview.background_wave_b, 0.35f));
+            renderer->fill_rect(card.x + 10, card.y + 36, card.w - 40, 4, mix_color(preview.background_wave_b, preview.background_bottom, 0.32f));
+            renderer->draw_text_centered(renderer->ellipsize_to_width(theme_label(theme_ids_[i]), box_w - 16, false),
+                                         card.x + card.w / 2,
+                                         card.y + 48,
+                                         focused ? preview.text_primary : preview.text_muted);
+        }
+        renderer->fill_rect(center_x - box_w / 2, y + box_h + 4, box_w, 2, theme.accent);
         draw_footer(renderer, layout, theme, tr(settings_, "Lewo/Prawo zmiana  A dalej", "Left/Right change  A next"));
         return;
     }
@@ -1397,7 +1517,7 @@ void PinLockScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSn
     (void)now_ms;
     (void)settings_;
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
     LayoutGuard guard("pin", renderer->width(), renderer->height());
@@ -1509,7 +1629,7 @@ SceneOutput LauncherScene::update(const InputSnapshot &input, uint32_t now_ms) {
 
     if (in_system_panel_) {
         if (input.nav_left) system_selected_ = std::max(0, system_selected_ - 1);
-        if (input.nav_right) system_selected_ = std::min(4, system_selected_ + 1);
+        if (input.nav_right) system_selected_ = std::min(5, system_selected_ + 1);
         if (input.nav_up || input.back) in_system_panel_ = false;
         if (input.accept) {
             out.request_scene = true;
@@ -1517,6 +1637,7 @@ SceneOutput LauncherScene::update(const InputSnapshot &input, uint32_t now_ms) {
             else if (system_selected_ == 1) out.next_scene = SCENE_DIAGNOSTICS;
             else if (system_selected_ == 2) out.next_scene = SCENE_SYSTEM_INFO;
             else if (system_selected_ == 3) out.next_scene = SCENE_FILE_MANAGER;
+            else if (system_selected_ == 4) out.next_scene = SCENE_CHARGER;
             else out.next_scene = SCENE_POWER_OFF;
             return out;
         }
@@ -1557,7 +1678,7 @@ SceneOutput LauncherScene::update(const InputSnapshot &input, uint32_t now_ms) {
 
 void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot) {
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
     refresh_items_cache(now_ms, false);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
@@ -1572,14 +1693,24 @@ void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
 
     draw_top_bar(renderer, layout, theme, safe_username(profile_), "", snapshot.battery_percent);
 
-    draw_card(renderer, layout.content, theme, false);
-    const LayoutRect content = inset(layout.content, 6);
+    renderer->draw_panel_cached("launcher-shell",
+                                layout.content.x,
+                                layout.content.y,
+                                layout.content.w,
+                                layout.content.h,
+                                mix_color(theme.panel_top, theme.background_top, 0.26f),
+                                mix_color(theme.panel_bottom, theme.background_bottom, 0.18f),
+                                mix_color(theme.panel_border, theme.background_bottom, 0.32f),
+                                theme.corner_radius + 2,
+                                static_cast<uint8_t>(std::max(128, theme.panel_alpha - 30)),
+                                false);
+    const LayoutRect content = inset(layout.content, 8);
 
-    const int details_w = static_cast<int>(176.0f * panel_t_);
-    const int bottom_panel_h = 52;
-    const int lift_px = static_cast<int>(42.0f * bottom_panel_t_);
-    const LayoutRect carousel_area(content.x + 6, content.y + 8 - lift_px, content.w - 12 - details_w, 118);
-    const LayoutRect info_area(content.x + 6, carousel_area.bottom() + 6, content.w - 12, 30);
+    const int details_w = static_cast<int>(174.0f * panel_t_);
+    const int bottom_panel_h = 48;
+    const int lift_px = static_cast<int>(34.0f * bottom_panel_t_);
+    const LayoutRect carousel_area(content.x + 2, content.y + 4 - lift_px, content.w - 8 - details_w, 136);
+    const LayoutRect info_area(content.x + 6, carousel_area.bottom() + 2, content.w - 12, 54);
     guard.add("carousel", carousel_area);
     guard.add("info", info_area);
 
@@ -1591,17 +1722,18 @@ void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
 
     const int center_x = carousel_area.x + carousel_area.w / 2;
     const int base_y = carousel_area.y + 8;
-    const float spacing = 92.0f;
+    const float spacing = 98.0f;
 
     int title_center_x = center_x;
-    int title_y = std::max(info_area.y + 2, std::min(info_area.bottom() - 18, base_y + 98));
+    int title_y = std::max(info_area.y + 2, std::min(info_area.bottom() - 18, base_y + 110));
     std::string title_text;
+    std::string subtitle_text;
 
     if (total == 0) {
-        renderer->draw_text_centered(tr(settings_, "Brak aplikacji", "No applications"), center_x, base_y + 40, theme.warn, true);
+        renderer->draw_text_centered(tr(settings_, "Brak aplikacji", "No applications"), center_x, base_y + 48, theme.warn, true);
         renderer->draw_text_centered(tr(settings_, "Dodaj app.json + icon.png + launch.sh", "Add app.json + icon.png + launch.sh"),
                                      center_x,
-                                     base_y + 66,
+                                     base_y + 74,
                                      theme.text_muted);
     } else {
         for (int i = 0; i < total; ++i) {
@@ -1610,15 +1742,19 @@ void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
             if (dist > 3.2f) continue;
 
             const bool focused = (std::fabs(rel) < 0.42f) && !in_system_panel_;
-            const int tile = focused ? 94 : std::max(58, 82 - static_cast<int>(dist * 16.0f));
+            const int tile = focused ? 118 : std::max(62, 88 - static_cast<int>(dist * 18.0f));
             const int x = center_x + static_cast<int>(rel * spacing) - tile / 2;
-            const int y = base_y + static_cast<int>(dist * 10.0f);
+            const int y = base_y + static_cast<int>(dist * 14.0f);
             const LayoutRect tile_r(x, y, tile, tile);
             if (tile_r.right() < carousel_area.x || tile_r.x > carousel_area.right()) continue;
 
+            if (focused) {
+                renderer->fill_rect(tile_r.x + 8, tile_r.bottom() - 6, tile_r.w - 16, 10, mix_color(theme.glow_soft, theme.background_bottom, 0.42f));
+                renderer->fill_rect(tile_r.x + 14, tile_r.bottom() - 2, tile_r.w - 28, 4, mix_color(theme.accent, theme.background_bottom, 0.35f));
+            }
             draw_card(renderer, tile_r, theme, focused);
 
-            const int icon_size = std::max(30, tile - 22);
+            const int icon_size = std::max(34, tile - (focused ? 18 : 22));
             const int icon_x = tile_r.x + (tile_r.w - icon_size) / 2;
             const int icon_y = tile_r.y + (tile_r.h - icon_size) / 2;
 
@@ -1634,11 +1770,12 @@ void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
         const AppEntry &focused = entries[selected_];
         const float rel = static_cast<float>(selected_) - selection_t_;
         const float dist = std::fabs(rel);
-        const int tile = std::max(58, 94 - static_cast<int>(dist * 16.0f));
+        const int tile = std::max(62, 118 - static_cast<int>(dist * 18.0f));
         const int tile_x = center_x + static_cast<int>(rel * spacing) - tile / 2;
         title_center_x = tile_x + tile / 2;
-        title_y = std::max(info_area.y + 2, std::min(info_area.bottom() - 18, base_y + tile + static_cast<int>(dist * 10.0f) + 4));
+        title_y = std::max(info_area.y + 2, std::min(info_area.bottom() - 18, base_y + tile + static_cast<int>(dist * 10.0f) + 8));
         title_text = localized_csv_value(focused.name, settings_);
+        subtitle_text = localized_csv_value(focused.category, settings_);
     }
 
     if (in_system_panel_) {
@@ -1647,12 +1784,19 @@ void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
         else if (system_selected_ == 1) title_text = tr(settings_, "Diagnostyka", "Diagnostics");
         else if (system_selected_ == 2) title_text = tr(settings_, "Informacje", "System Info");
         else if (system_selected_ == 3) title_text = tr(settings_, "Menedżer plików", "File Manager");
+        else if (system_selected_ == 4) title_text = tr(settings_, "Tryb ładowania", "Charging Mode");
         else title_text = tr(settings_, "Wyłączanie", "Power Off");
     }
     if (!title_text.empty()) {
         const int label_max_w = std::max(120, info_area.w - 20);
         const std::string clipped = renderer->ellipsize_to_width(title_text, label_max_w, true);
-        renderer->draw_text_centered(clipped, title_center_x, title_y, theme.text_primary, true);
+        draw_text_with_shadow(renderer, clipped, info_area.x + 10, info_area.y + 4, theme, true);
+        if (!subtitle_text.empty() && !in_system_panel_) {
+            const std::string sub = renderer->ellipsize_to_width(subtitle_text, info_area.w - 20, false);
+            renderer->draw_text(sub, info_area.x + 10, info_area.y + 28, theme.text_muted);
+        }
+        renderer->fill_rect(info_area.x + 10, info_area.y + info_area.h - 4, std::max(40, std::min(104, renderer->text_width(clipped, true) + 8)), 2,
+                            theme.accent);
     }
 
     if (bottom_panel_t_ > 0.01f) {
@@ -1660,29 +1804,35 @@ void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
         draw_card(renderer, bottom_panel, theme, in_system_panel_);
         guard.add("system-panel", bottom_panel, true);
 
-        const int chip = 24;
-        const int gap = 8;
-        const int start_x = bottom_panel.x + (bottom_panel.w - (chip * 5 + gap * 4)) / 2;
-        const LayoutRect set_r(start_x, bottom_panel.y + 12, chip, chip);
-        const LayoutRect dia_r(start_x + chip + gap, bottom_panel.y + 12, chip, chip);
-        const LayoutRect inf_r(start_x + (chip + gap) * 2, bottom_panel.y + 12, chip, chip);
-        const LayoutRect fil_r(start_x + (chip + gap) * 3, bottom_panel.y + 12, chip, chip);
-        const LayoutRect pwr_r(start_x + (chip + gap) * 4, bottom_panel.y + 12, chip, chip);
+        const int chip = 28;
+        const int gap = 10;
+        const int start_x = bottom_panel.x + (bottom_panel.w - (chip * 6 + gap * 5)) / 2;
+        const LayoutRect set_r(start_x, bottom_panel.y + 10, chip, chip);
+        const LayoutRect dia_r(start_x + chip + gap, bottom_panel.y + 10, chip, chip);
+        const LayoutRect inf_r(start_x + (chip + gap) * 2, bottom_panel.y + 10, chip, chip);
+        const LayoutRect fil_r(start_x + (chip + gap) * 3, bottom_panel.y + 10, chip, chip);
+        const LayoutRect chg_r(start_x + (chip + gap) * 4, bottom_panel.y + 10, chip, chip);
+        const LayoutRect pwr_r(start_x + (chip + gap) * 5, bottom_panel.y + 10, chip, chip);
         draw_system_chip(renderer, set_r, theme, in_system_panel_ && system_selected_ == 0, 0);
         draw_system_chip(renderer, dia_r, theme, in_system_panel_ && system_selected_ == 1, 1);
         draw_system_chip(renderer, inf_r, theme, in_system_panel_ && system_selected_ == 2, 2);
         draw_system_chip(renderer, fil_r, theme, in_system_panel_ && system_selected_ == 3, 4);
-        draw_system_chip(renderer, pwr_r, theme, in_system_panel_ && system_selected_ == 4, 3);
+        draw_system_chip(renderer, chg_r, theme, in_system_panel_ && system_selected_ == 4, 5);
+        draw_system_chip(renderer, pwr_r, theme, in_system_panel_ && system_selected_ == 5, 3);
 
         if (in_system_panel_) {
             const int target_x =
                 (system_selected_ == 0
                      ? set_r.x
-                     : (system_selected_ == 1 ? dia_r.x : (system_selected_ == 2 ? inf_r.x : (system_selected_ == 3 ? fil_r.x : pwr_r.x))));
+                     : (system_selected_ == 1
+                            ? dia_r.x
+                            : (system_selected_ == 2 ? inf_r.x : (system_selected_ == 3 ? fil_r.x : (system_selected_ == 4 ? chg_r.x : pwr_r.x)))));
             const int target_w =
                 (system_selected_ == 0
                      ? set_r.w
-                     : (system_selected_ == 1 ? dia_r.w : (system_selected_ == 2 ? inf_r.w : (system_selected_ == 3 ? fil_r.w : pwr_r.w))));
+                     : (system_selected_ == 1
+                            ? dia_r.w
+                            : (system_selected_ == 2 ? inf_r.w : (system_selected_ == 3 ? fil_r.w : (system_selected_ == 4 ? chg_r.w : pwr_r.w)))));
             const float follow = 0.28f;
             if (system_marker_t_ < 0.0f) system_marker_t_ = static_cast<float>(target_x);
             system_marker_t_ += (static_cast<float>(target_x) - system_marker_t_) * follow;
@@ -1740,6 +1890,8 @@ void LauncherScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
                                   ? tr(settings_, "A otwórz  Góra wróć  B zamknij", "A open  Up return  B close")
                                   : tr(settings_, "Lewo/Prawo aplikacje  Dół system  SELECT szczegóły  A start",
                                        "Left/Right apps  Down system  SELECT details  A launch");
+    (void)title_center_x;
+    (void)title_y;
     draw_footer(renderer, layout, theme, hints);
 }
 
@@ -2050,8 +2202,19 @@ SceneOutput SettingsScene::update(const InputSnapshot &input, uint32_t now_ms) {
 
                 if (option_selected_ == 1) {
                     if (input.nav_left || input.nav_right || input.accept) {
+                        std::vector<std::string> themes = available_theme_ids();
+                        if (themes.empty()) themes.push_back("midnight_violet");
+                        int theme_idx = 0;
                         const std::string curr = normalize_theme_id(settings_->theme_id);
-                        settings_->theme_id = (curr == "graphite_light") ? "tech_noir" : "graphite_light";
+                        for (size_t i = 0; i < themes.size(); ++i) {
+                            if (themes[i] == curr) {
+                                theme_idx = static_cast<int>(i);
+                                break;
+                            }
+                        }
+                        if (input.nav_left) theme_idx = std::max(0, theme_idx - 1);
+                        else theme_idx = std::min(std::max(0, static_cast<int>(themes.size()) - 1), theme_idx + 1);
+                        settings_->theme_id = themes[theme_idx];
                         changed = true;
                     }
                 }
@@ -2084,7 +2247,7 @@ SceneOutput SettingsScene::update(const InputSnapshot &input, uint32_t now_ms) {
 
 void SettingsScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot) {
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
     draw_top_bar(renderer, layout, theme, tr(settings_, "Ustawienia", "Settings"), "", snapshot.battery_percent);
@@ -2135,8 +2298,7 @@ void SettingsScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
 
     if (category_selected_ == 0) {
         draw_option(0, tr(settings_, "Język", "Language"), language_label(settings_->language), false, 0);
-        const std::string theme_name =
-            normalize_theme_id(settings_->theme_id) == "graphite_light" ? tr(settings_, "Jasny", "Light") : tr(settings_, "Ciemny", "Dark");
+        const std::string theme_name = theme_label(settings_->theme_id);
         draw_option(1, tr(settings_, "Motyw", "Theme"), theme_name, false, 0);
     } else {
         draw_option(0, tr(settings_, "Reset ustawień", "Factory reset"), "", false, 0);
@@ -2322,7 +2484,7 @@ void DiagnosticsScene::render(Renderer *renderer, uint32_t now_ms, const UiRunti
     (void)battery_;
     (void)logger_;
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
     draw_top_bar(renderer, layout, theme, tr(settings_, "Diagnostyka", "Diagnostics"), "", snapshot.battery_percent);
@@ -2425,7 +2587,14 @@ void SystemInfoScene::refresh_cached_stats(uint32_t now_ms) {
     if (now_ms < next_refresh_ms_) return;
     next_refresh_ms_ = now_ms + 1000;
 
-    app_count_cached_ = registry_ ? static_cast<int>(registry_->all_apps().size()) : 0;
+    if (!registry_) {
+        app_count_cached_ = 0;
+    } else {
+        const std::vector<AppEntry> all = registry_->all_apps();
+        app_count_cached_ = static_cast<int>(std::count_if(all.begin(), all.end(), [](const AppEntry &app) {
+            return !app.builtin;
+        }));
+    }
 
     const std::string cpu_model =
         trim_copy(proc_value_after_colon("/proc/cpuinfo", "model name").empty()
@@ -2450,7 +2619,7 @@ SceneOutput SystemInfoScene::update(const InputSnapshot &input, uint32_t now_ms)
 void SystemInfoScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot) {
     (void)now_ms;
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
     draw_top_bar(renderer, layout, theme, tr(settings_, "Informacje systemowe", "System Info"), "", snapshot.battery_percent);
@@ -2932,7 +3101,7 @@ SceneOutput FileManagerScene::update(const InputSnapshot &input, uint32_t now_ms
 
 void FileManagerScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot) {
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
     draw_top_bar(renderer, layout, theme, tr(settings_, "Menedżer plików", "File Manager"), "", snapshot.battery_percent);
@@ -3036,7 +3205,7 @@ SceneOutput PowerOffScene::update(const InputSnapshot &input, uint32_t) {
 void PowerOffScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot) {
     (void)now_ms;
     const Theme &theme = ui_theme(settings_);
-    render_static_background(renderer, theme);
+    render_static_background(renderer, theme, now_ms);
 
     const LayoutMetrics layout = build_layout_metrics(renderer->width(), renderer->height());
     draw_top_bar(renderer, layout, theme, tr(settings_, "Wyłączanie", "Power Off"), "", snapshot.battery_percent);
@@ -3060,6 +3229,123 @@ void PowerOffScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeS
     draw_footer(renderer, layout, theme, tr(settings_, "Tryb wyłączania: odłącz zasilanie", "Power-off mode: disconnect power"));
 }
 
+ChargingScene::ChargingScene(Settings *settings, SettingsStore *settings_store, BatteryMonitor *battery, Logger *logger)
+    : settings_(settings),
+      settings_store_(settings_store),
+      battery_(battery),
+      logger_(logger),
+      resume_brightness_(80),
+      sleeping_(true),
+      wake_until_ms_(0),
+      ui_visible_until_ms_(0),
+      prev_start_select_hold_(false) {}
+
+void ChargingScene::set_sleeping(bool sleeping, uint32_t now_ms) {
+    if (sleeping_ == sleeping) return;
+    sleeping_ = sleeping;
+
+    if (!settings_store_) return;
+
+    if (sleeping_) {
+        settings_store_->apply_brightness(0, logger_);
+        if (logger_) logger_->info("Charging mode entered display sleep");
+    } else {
+        settings_store_->apply_brightness(resume_brightness_, logger_);
+        wake_until_ms_ = now_ms + 3500;
+        if (logger_) logger_->info("Charging mode woke display");
+    }
+}
+
+void ChargingScene::on_enter() {
+    resume_brightness_ = settings_ ? std::max(1, std::min(100, settings_->brightness)) : 80;
+    sleeping_ = false;
+    wake_until_ms_ = 0;
+    ui_visible_until_ms_ = 0;
+    prev_start_select_hold_ = false;
+    set_sleeping(true, SDL_GetTicks());
+}
+
+SceneOutput ChargingScene::update(const InputSnapshot &input, uint32_t now_ms) {
+    SceneOutput out;
+
+    const bool start_select_hold = input.hold_start && input.hold_select;
+    const bool start_select_edge = start_select_hold && !prev_start_select_hold_;
+    prev_start_select_hold_ = start_select_hold;
+
+    if (start_select_edge) {
+        if (settings_store_) settings_store_->apply_brightness(resume_brightness_, logger_);
+        out.request_scene = true;
+        out.next_scene = SCENE_LAUNCHER;
+        return out;
+    }
+
+    const bool active = any_input_activity(input);
+
+    if (active) {
+        ui_visible_until_ms_ = now_ms + 2000;
+    }
+
+    if (sleeping_) {
+        if (active) set_sleeping(false, now_ms);
+    } else {
+        if (active) wake_until_ms_ = now_ms + 3500;
+        if (now_ms >= wake_until_ms_) set_sleeping(true, now_ms);
+    }
+
+    out.post_frame_delay_ms = sleeping_ ? 220 : 40;
+    return out;
+}
+
+void ChargingScene::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot) {
+    (void)battery_;
+
+    renderer->fill_rect(0, 0, renderer->width(), renderer->height(), Color{0, 0, 0});
+
+    const bool show_ui = now_ms < ui_visible_until_ms_;
+    if (!show_ui) return;
+
+    const Theme &theme = ui_theme(settings_);
+    const LayoutRect panel(renderer->width() / 2 - 110, renderer->height() / 2 - 70, 220, 140);
+
+    draw_card(renderer, panel, theme, true);
+
+    const BatteryInfo &bat = snapshot.battery;
+    const int percent = snapshot.battery_percent;
+
+    const std::string percent_text = percent >= 0 ? std::to_string(percent) + "%" : std::string("--");
+    const std::string status_text = localized_battery_status(settings_, bat);
+
+    renderer->draw_text_centered(tr(settings_, "Tryb ładowania", "Charging Mode"),
+                                 panel.x + panel.w / 2, panel.y + 10,
+                                 theme.text_primary, true);
+
+    draw_battery_icon(renderer,
+                      panel.x + panel.w / 2 - 20,
+                      panel.y + 38,
+                      40, 18,
+                      percent,
+                      theme);
+
+    renderer->draw_text_centered(percent_text,
+                                 panel.x + panel.w / 2,
+                                 panel.y + 64,
+                                 theme.ok, true);
+
+    renderer->draw_text_centered(status_text,
+                                 panel.x + panel.w / 2,
+                                 panel.y + 88,
+                                 theme.text_muted);
+
+    renderer->draw_text_centered(tr(settings_, "START + SELECT wraca", "START + SELECT returns"),
+                                 panel.x + panel.w / 2,
+                                 panel.y + 108,
+                                 theme.text_muted);
+
+    renderer->draw_text_centered(tr(settings_, "Za chwilę ekran znów zgaśnie", "Screen will sleep again soon"),
+                                 panel.x + panel.w / 2,
+                                 panel.y + 122,
+                                 mix_color(theme.text_muted, Color{255, 255, 255}, 0.12f));
+}
 SceneManager::SceneManager()
     : current_(SCENE_LAUNCHER), target_(SCENE_LAUNCHER), has_current_(false), phase_(TRANSITION_NONE), phase_elapsed_ms_(0) {}
 
@@ -3134,7 +3420,7 @@ void SceneManager::render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSn
     } else {
         alpha = static_cast<uint8_t>((1.0f - eased) * static_cast<float>(kMaxAlpha));
     }
-    renderer->draw_fade(alpha);
+    renderer->draw_fade(Color{18, 10, 30}, alpha);
 }
 
 }  // namespace inconsole

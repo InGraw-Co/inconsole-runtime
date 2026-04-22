@@ -20,15 +20,21 @@ struct Color {
 
 struct Theme {
     std::string id;
+    std::string display_name;
     Color background_top;
     Color background_bottom;
     Color background_glow;
+    Color background_wave_a;
+    Color background_wave_b;
     Color panel_top;
     Color panel_bottom;
     Color panel_border;
     Color panel_focus_top;
     Color panel_focus_bottom;
     Color panel_focus_border;
+    Color glow_soft;
+    Color shadow;
+    Color overlay;
     Color text_primary;
     Color text_muted;
     Color text_invert;
@@ -39,6 +45,9 @@ struct Theme {
     Color footer_top;
     Color footer_bottom;
     Color footer_border;
+    int corner_radius;
+    int panel_alpha;
+    int background_motion;
 
     Theme();
 };
@@ -406,7 +415,18 @@ public:
     void draw_icon64(const std::string &path, int x, int y);
     void draw_icon(const std::string &path, int x, int y, int w, int h);
     void draw_background_cached(const std::string &theme_key, const Color &top, const Color &bottom, const Color &scanline);
-    void draw_panel_cached(const std::string &style_key, int x, int y, int w, int h, const Color &top, const Color &bottom, const Color &border);
+    void draw_panel_cached(const std::string &style_key,
+                           int x,
+                           int y,
+                           int w,
+                           int h,
+                           const Color &top,
+                           const Color &bottom,
+                           const Color &border,
+                           int radius = 0,
+                           uint8_t alpha = 255,
+                           bool focus_glow = false);
+    void draw_fade(const Color &color, uint8_t alpha);
     void draw_fade(uint8_t alpha);
     bool has_vsync() const;
 
@@ -511,7 +531,8 @@ enum SceneId {
     SCENE_DIAGNOSTICS = 4,
     SCENE_SYSTEM_INFO = 5,
     SCENE_FILE_MANAGER = 6,
-    SCENE_POWER_OFF = 7
+    SCENE_POWER_OFF = 7,
+    SCENE_CHARGER = 8
 };
 
 struct SceneOutput {
@@ -521,6 +542,7 @@ struct SceneOutput {
     bool request_launch;
     AppEntry launch_app;
     bool request_restart;
+    uint32_t post_frame_delay_ms;
 
     SceneOutput();
 };
@@ -567,6 +589,7 @@ private:
     TextInputState name_input_;
     KeyboardLayout keyboard_layout_;
     std::vector<std::string> language_codes_;
+    std::vector<std::string> theme_ids_;
     int language_selected_;
     float language_cursor_t_;
     int theme_selected_;
@@ -817,6 +840,28 @@ private:
     const Settings *settings_;
 };
 
+class ChargingScene : public Scene {
+public:
+    ChargingScene(Settings *settings, SettingsStore *settings_store, BatteryMonitor *battery, Logger *logger);
+
+    void on_enter();
+    SceneOutput update(const InputSnapshot &input, uint32_t now_ms);
+    void render(Renderer *renderer, uint32_t now_ms, const UiRuntimeSnapshot &snapshot);
+
+private:
+    Settings *settings_;
+    SettingsStore *settings_store_;
+    BatteryMonitor *battery_;
+    Logger *logger_;
+    int resume_brightness_;
+    bool sleeping_;
+    uint32_t wake_until_ms_;
+    bool prev_start_select_hold_;
+    uint32_t ui_visible_until_ms_;
+
+    void set_sleeping(bool sleeping, uint32_t now_ms);
+};
+
 class SceneManager {
 public:
     SceneManager();
@@ -872,6 +917,7 @@ private:
     SystemInfoScene system_info_scene_;
     FileManagerScene file_manager_scene_;
     PowerOffScene power_off_scene_;
+    ChargingScene charging_scene_;
     SceneManager scene_manager_;
 
     std::string overlay_message_;
@@ -899,6 +945,8 @@ std::vector<std::string> available_languages();
 std::string language_label(const std::string &language);
 std::string translate_ui_text(const std::string &language, const std::string &key, const std::string &fallback);
 std::string normalize_theme_id(const std::string &theme_id);
+std::vector<std::string> available_theme_ids();
+std::string theme_label(const std::string &theme_id);
 const Theme &theme_by_id(const std::string &theme_id);
 const Typography &default_typography();
 LayoutMetrics build_layout_metrics(int screen_w, int screen_h);

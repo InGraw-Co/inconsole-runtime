@@ -72,6 +72,20 @@ Color color_mixf(const Color &a, const Color &b, float t) {
     return c;
 }
 
+bool point_inside_rounded_box(int x, int y, int w, int h, int radius) {
+    if (radius <= 0) return x >= 0 && x < w && y >= 0 && y < h;
+    const int r = std::max(0, std::min(radius, std::min(w, h) / 2));
+    if (r <= 0) return true;
+
+    if ((x >= r && x < w - r) || (y >= r && y < h - r)) return true;
+
+    const int cx = (x < r) ? r - 1 : (w - r);
+    const int cy = (y < r) ? r - 1 : (h - r);
+    const int dx = x - cx;
+    const int dy = y - cy;
+    return dx * dx + dy * dy <= r * r;
+}
+
 int env_int_or_default(const char *name, int fallback) {
     const char *v = getenv(name);
     if (!v || !*v) return fallback;
@@ -922,6 +936,7 @@ void Renderer::draw_background_cached(const std::string &theme_key, const Color 
         ++style_cache_misses_;
         SDL_Surface *surface = create_rgba_surface(w, h);
         if (!surface) return;
+        SDL_LockSurface(surface);
         for (int y = 0; y < h; ++y) {
             const float t = h > 1 ? static_cast<float>(y) / static_cast<float>(h - 1) : 0.0f;
             Color line = color_mixf(top, bottom, t);
@@ -954,14 +969,17 @@ void Renderer::draw_panel_cached(const std::string &style_key,
                                  int h,
                                  const Color &top,
                                  const Color &bottom,
-                                 const Color &border) {
+                                 const Color &border,
+                                 int radius,
+                                 uint8_t alpha,
+                                 bool focus_glow) {
     if (!screen_ || w <= 0 || h <= 0) return;
 
     std::ostringstream key_builder;
     key_builder << "panel:" << style_key << ":" << w << "x" << h << ":" << static_cast<int>(top.r) << "," << static_cast<int>(top.g) << ","
                 << static_cast<int>(top.b) << ":" << static_cast<int>(bottom.r) << "," << static_cast<int>(bottom.g) << ","
                 << static_cast<int>(bottom.b) << ":" << static_cast<int>(border.r) << "," << static_cast<int>(border.g) << ","
-                << static_cast<int>(border.b);
+                << static_cast<int>(border.b) << ":r" << radius << ":a" << static_cast<int>(alpha) << ":g" << (focus_glow ? 1 : 0);
     const std::string key = key_builder.str();
 
     StyleTexture *panel = get_style_texture(key);
@@ -969,39 +987,51 @@ void Renderer::draw_panel_cached(const std::string &style_key,
         ++style_cache_misses_;
         SDL_Surface *surface = create_rgba_surface(w, h);
         if (!surface) return;
+        SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 0));
+        SDL_LockSurface(surface);
 
         for (int py = 0; py < h; ++py) {
             const float t = h > 1 ? static_cast<float>(py) / static_cast<float>(h - 1) : 0.0f;
+            const float center_bias = std::fabs((t - 0.32f) * 1.6f);
             Color line = color_mixf(top, bottom, t);
-            SDL_Rect row;
-            row.x = 0;
-            row.y = py;
-            row.w = w;
-            row.h = 1;
-            SDL_FillRect(surface, &row, SDL_MapRGBA(surface->format, line.r, line.g, line.b, 255));
+            line = color_mixf(line, Color{255, 255, 255}, std::max(0.0f, 0.16f - center_bias * 0.18f));
+            for (int px = 0; px < w; ++px) {
+                if (!point_inside_rounded_box(px, py, w, h, radius)) continue;
+                uint32_t *dst = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(surface->pixels) + py * surface->pitch + px * 4);
+                *dst = SDL_MapRGBA(surface->format, line.r, line.g, line.b, alpha);
+            }
         }
 
-        SDL_Rect border_outer = {0, 0, static_cast<Uint16>(w), 1};
-        SDL_FillRect(surface, &border_outer, SDL_MapRGBA(surface->format, border.r, border.g, border.b, 255));
-        border_outer = SDL_Rect{0, static_cast<Sint16>(h - 1), static_cast<Uint16>(w), 1};
-        SDL_FillRect(surface, &border_outer, SDL_MapRGBA(surface->format, border.r, border.g, border.b, 255));
-        border_outer = SDL_Rect{0, 0, 1, static_cast<Uint16>(h)};
-        SDL_FillRect(surface, &border_outer, SDL_MapRGBA(surface->format, border.r, border.g, border.b, 255));
-        border_outer = SDL_Rect{static_cast<Sint16>(w - 1), 0, 1, static_cast<Uint16>(h)};
-        SDL_FillRect(surface, &border_outer, SDL_MapRGBA(surface->format, border.r, border.g, border.b, 255));
-
-        if (w > 4 && h > 4) {
-            const Color inner = color_mixf(border, Color{255, 255, 255}, 0.15f);
-            SDL_Rect r1 = {1, 1, static_cast<Uint16>(w - 2), 1};
-            SDL_Rect r2 = {1, static_cast<Sint16>(h - 2), static_cast<Uint16>(w - 2), 1};
-            SDL_Rect r3 = {1, 1, 1, static_cast<Uint16>(h - 2)};
-            SDL_Rect r4 = {static_cast<Sint16>(w - 2), 1, 1, static_cast<Uint16>(h - 2)};
-            const uint32_t inner_rgba = SDL_MapRGBA(surface->format, inner.r, inner.g, inner.b, 255);
-            SDL_FillRect(surface, &r1, inner_rgba);
-            SDL_FillRect(surface, &r2, inner_rgba);
-            SDL_FillRect(surface, &r3, inner_rgba);
-            SDL_FillRect(surface, &r4, inner_rgba);
+        const Color inner = color_mixf(border, Color{255, 255, 255}, 0.14f);
+        for (int py = 0; py < h; ++py) {
+            for (int px = 0; px < w; ++px) {
+                if (!point_inside_rounded_box(px, py, w, h, radius)) continue;
+                const bool edge =
+                    !point_inside_rounded_box(px - 1, py, w, h, radius) || !point_inside_rounded_box(px + 1, py, w, h, radius) ||
+                    !point_inside_rounded_box(px, py - 1, w, h, radius) || !point_inside_rounded_box(px, py + 1, w, h, radius);
+                const bool inner_edge =
+                    px > 0 && py > 0 && px + 1 < w && py + 1 < h &&
+                    (!point_inside_rounded_box(px - 2, py, w, h, radius) || !point_inside_rounded_box(px + 2, py, w, h, radius) ||
+                     !point_inside_rounded_box(px, py - 2, w, h, radius) || !point_inside_rounded_box(px, py + 2, w, h, radius));
+                if (!edge && !inner_edge) continue;
+                const Color shade = edge ? border : inner;
+                const uint8_t shade_alpha = edge ? 255 : static_cast<uint8_t>(std::min(255, static_cast<int>(alpha) + 6));
+                uint32_t *dst = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(surface->pixels) + py * surface->pitch + px * 4);
+                *dst = SDL_MapRGBA(surface->format, shade.r, shade.g, shade.b, shade_alpha);
+            }
         }
+
+        if (focus_glow && h > 10 && w > 10) {
+            const Color glow = color_mixf(border, Color{255, 255, 255}, 0.22f);
+            for (int py = 2; py < std::min(h - 2, 7); ++py) {
+                for (int px = 4; px < w - 4; ++px) {
+                    if (!point_inside_rounded_box(px, py, w, h, radius)) continue;
+                    uint32_t *dst = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(surface->pixels) + py * surface->pitch + px * 4);
+                    *dst = SDL_MapRGBA(surface->format, glow.r, glow.g, glow.b, static_cast<uint8_t>(std::max(36, 110 - py * 10)));
+                }
+            }
+        }
+        SDL_UnlockSurface(surface);
 
         panel = cache_style_surface(key, surface);
         SDL_FreeSurface(surface);
@@ -1041,15 +1071,15 @@ void Renderer::draw_icon(const std::string &path, int x, int y, int w, int h) {
     SDL_BlitSurface(icon->surface, nullptr, screen_, &dst);
 }
 
-void Renderer::draw_fade(uint8_t alpha) {
+void Renderer::draw_fade(const Color &color, uint8_t alpha) {
     if (!screen_ || alpha == 0) return;
 
     if (!fade_surface_ || fade_surface_->w != width() || fade_surface_->h != height()) {
         if (fade_surface_) SDL_FreeSurface(fade_surface_);
         fade_surface_ = create_rgba_surface(width(), height());
         if (!fade_surface_) return;
-        SDL_FillRect(fade_surface_, nullptr, SDL_MapRGBA(fade_surface_->format, 0, 0, 0, 255));
     }
+    SDL_FillRect(fade_surface_, nullptr, SDL_MapRGBA(fade_surface_->format, color.r, color.g, color.b, 255));
     SDL_SetAlpha(fade_surface_, SDL_SRCALPHA, alpha);
 
     SDL_Rect dst;
@@ -1059,6 +1089,8 @@ void Renderer::draw_fade(uint8_t alpha) {
     dst.h = height();
     SDL_BlitSurface(fade_surface_, nullptr, screen_, &dst);
 }
+
+void Renderer::draw_fade(uint8_t alpha) { draw_fade(Color{0, 0, 0}, alpha); }
 
 bool Renderer::has_vsync() const { return has_vsync_; }
 
